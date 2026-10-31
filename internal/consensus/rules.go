@@ -1,0 +1,177 @@
+// Package consensus holds the pure monetary and timing rules of the Noso
+// chain: supply, block reward, reward splits and fees. Every function
+// mirrors one Pascal routine and keeps its Int64/Integer arithmetic
+// (truncating division, no overflow checks).
+package consensus
+
+import "strings"
+
+// Chain constants (masterpaskalform.pas:586-615).
+const (
+	SecondsPerBlock      = 600
+	PremineAmount        = 1030390730000
+	InitialReward        = 5000000000
+	BlockHalvingInterval = 210000
+	HalvingSteps         = 10
+	Comisiontrfr         = 10000
+	MinimunFee           = 10
+	PoSPercentage        = 1000
+	MNsPercentage        = 2000
+	PosStackCoins        = 20
+	PoSBlockStart        = 8425
+	PoSBlockEnd          = 88500 // COMPAT: a typed const (mutable var) in Pascal
+	MNBlockStart         = 48010
+	InitialBlockDiff     = 60
+	GenesysTimeStamp     = 1615132800
+	GenesisStartTime     = 1531896783 // mpblock.pas:150
+	SecurityBlocks       = 4000
+	SumMarkInterval      = 100
+	Update050Block       = 120000
+	ProjectFunds         = "NpryectdevepmentfundsGE"
+	AdminHash            = "N3DthVsfEUtqrgWFHTEB6F88xLkT3Df"
+	AdminPubKey          = "BACo0LC7mWDn53orLANA2zKVSC1HfSe/jc/Ih7+cBQ1oh53Bu2Zo655WFmWnoKHEeaNflb1CR9WcfXuhmkKaY8Y="
+)
+
+// GetSupply mirrors nosogeneral.pas:213-223. Blocks of 420000 and above
+// return 0 (COMPAT: no supply is defined after the second halving period).
+func GetSupply(block int64) int64 {
+	switch {
+	case block < 210000:
+		return block*5000000000 + 1030390730000
+	case block >= 210000 && block < 420000:
+		return 209999*5000000000 + 1030390730000 + (block-209999)*5000000000
+	}
+	return 0
+}
+
+// GetBlockReward mirrors mpblock.pas:489-500: the premine for block 0,
+// 5000000000 halved every 210000 blocks for 11 periods, then 0.
+func GetBlockReward(n int64) int64 {
+	switch {
+	case n == 0:
+		return PremineAmount
+	case n > 0 && n < BlockHalvingInterval*(HalvingSteps+1):
+		halvings := n / BlockHalvingInterval
+		return InitialReward / (int64(1) << uint(halvings))
+	}
+	return 0
+}
+
+// Restar mirrors nosogeneral.pas:226-230.
+func Restar(n int64) int64 {
+	if n > 0 {
+		return n - n*2
+	}
+	return n
+}
+
+// GetCustFee mirrors nosogeneral.pas:278-282.
+func GetCustFee(block int64) int64 {
+	if block < 162000 {
+		return 25000
+	}
+	return 1000000
+}
+
+// GetStackRequired mirrors nosogeneral.pas:285-290 (the 1100000000000 cap
+// is always overridden for blocks above 110000).
+func GetStackRequired(block int64) int64 {
+	r := GetSupply(block) * 20 / 10000
+	if r > 1100000000000 {
+		r = 1100000000000
+	}
+	if block > 110000 {
+		r = 1050000000000
+	}
+	return r
+}
+
+// GetMNsPercentage mirrors nosogeneral.pas:293-303 (0..10000). COMPAT: the
+// +1000 step uses 88400 while the PoS end constant elsewhere is 88500.
+func GetMNsPercentage(block int64, mode string) int64 {
+	var r int64
+	if block >= 48010 {
+		r = 2000 + ((block-48010)/4000)*100
+		if block >= 88400 {
+			r += 1000
+		}
+		if r > 6000 {
+			r = 6000
+		}
+		if strings.Contains(mode, "MNSONLY") {
+			r = 9000
+		}
+	}
+	return r
+}
+
+// GetPoSPercentage mirrors nosogeneral.pas:306-316.
+func GetPoSPercentage(block int64) int64 {
+	var r int64
+	if block > 8424 && block < 40000 {
+		r = 1000
+	}
+	if block >= 40000 {
+		r = 1000 + ((block-39000)/1000)*100
+		if r > 2000 {
+			r = 2000
+		}
+	}
+	if block >= 88400 {
+		r = 0
+	}
+	return r
+}
+
+// GetDevPercentage mirrors nosogeneral.pas:319-323.
+func GetDevPercentage(block int64) int64 {
+	if block >= 88400 {
+		return 1000
+	}
+	return 0
+}
+
+// GetMinimumFee mirrors nosogeneral.pas:326-330.
+func GetMinimumFee(amount int64) int64 {
+	r := amount / Comisiontrfr
+	if r < 1000000 {
+		r = 1000000
+	}
+	return r
+}
+
+// GetMaximunToSend mirrors nosogeneral.pas:333-348.
+func GetMaximunToSend(amount int64) int64 {
+	if amount < 1000000 {
+		return 0
+	}
+	maximo := amount * Comisiontrfr / (Comisiontrfr + 1)
+	comision := maximo / Comisiontrfr
+	if comision < 1000000 {
+		comision = 1000000
+	}
+	envio := maximo + comision
+	return maximo + (amount - envio)
+}
+
+// GetFee mirrors mpcoin.pas:265-269.
+func GetFee(amount int64) int64 {
+	r := amount / Comisiontrfr
+	if r < MinimunFee {
+		r = 1000000
+	}
+	return r
+}
+
+// BlockAge, NextBlockTimeStamp and IsBlockOpen mirror nosotime.pas:160-182
+// for an explicit UTC time.
+func BlockAge(utc int64) int64 { return utc % 600 }
+
+// NextBlockTimeStamp is the timestamp of the next block boundary.
+func NextBlockTimeStamp(utc int64) int64 { return utc + 600 - utc%600 }
+
+// IsBlockOpen is false in the first 10 and last 15 seconds of a period.
+func IsBlockOpen(utc int64) bool {
+	a := BlockAge(utc)
+	return !(a < 10 || a > 585)
+}

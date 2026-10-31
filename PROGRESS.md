@@ -6,7 +6,7 @@ Scope change received mid-task: Fyne GUI (cmd/nosogui) is now in scope, last sta
 - [x] codec text helpers (Parameter, Val-style parsing)
 - [x] codec/types records
 - [x] storage
-- [ ] consensus
+- [x] consensus (rules + node engine: blocks, pool, masternodes, summary rebuild)
 - [ ] network
 - [ ] rpc
 - [ ] cli

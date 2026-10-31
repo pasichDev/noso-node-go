@@ -90,6 +90,9 @@ func (s *SummaryDB) CreateNew(addBlockZero bool) {
 	defer s.mu.Unlock()
 	_ = os.WriteFile(s.path, nil, 0o644)
 	s.rebuildIndexLocked()
+	// Hardening: Pascal keeps stale block records here, which would be
+	// written at slots beyond the new empty file.
+	s.block, s.brHash = nil, nil
 	if addBlockZero {
 		s.creditLocked(GenesisAddress, Premine, 0)
 		s.updateChangesLocked()
@@ -358,6 +361,9 @@ func (s *SummaryDB) updateChangesLocked() {
 				s.recs = append(s.recs, b.rec)
 				s.addIndex(b.rec, b.slot)
 			} else {
+				for int64(len(s.recs)) <= b.slot { // the file grows with zero records
+					s.recs = append(s.recs, types.Summary{})
+				}
 				s.recs[b.slot] = b.rec
 			}
 			_, _ = f.WriteAt(b.rec.Encode(), b.slot*types.SummarySize)
