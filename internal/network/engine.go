@@ -3,6 +3,7 @@ package network
 import (
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,7 +34,7 @@ type Engine struct {
 	cons              []string
 	consMu            sync.Mutex
 	nodesArr          []nodeConsensus
-	ConsStats         ConsensusStats
+	consStats         ConsensusStats
 	lastConsensusTime int64
 
 	// bots / ip control (nosoipcontrol.pas, nosonetwork.pas bots)
@@ -76,10 +77,13 @@ type Engine struct {
 	expMu  sync.Mutex
 	expect map[expectKey]int64
 
-	limMu    sync.Mutex
-	fileLast map[string]int64   // kind+ip -> last served
-	heavy    map[string][]int64 // ip -> recent heavy requests
-	lineLog  map[int][]int64    // slot -> recent line times
+	limMu     sync.Mutex
+	fileLast  map[string]int64   // kind+ip -> last served
+	heavy     map[string][]int64 // ip -> recent heavy requests
+	lineLog   map[int][]int64    // slot -> recent line times
+	byteWin   map[int]*window    // slot -> bytes received in the current window
+	mnRepoWin map[int]*window    // slot -> $MNREPO lines in the current window
+	sendSlots chan struct{}      // bounds file transfers being sent at once
 
 	stop chan struct{}
 	wg   sync.WaitGroup
@@ -93,7 +97,8 @@ type Engine struct {
 func NewEngine(n *node.Node) *Engine {
 	e := &Engine{N: n, MinPeers: 3, bots: map[string]int64{}, ipCtl: map[string]int{},
 		stop: make(chan struct{}), cmds: make(chan string, 256),
-		expect: map[expectKey]int64{}, fileLast: map[string]int64{}, heavy: map[string][]int64{}, lineLog: map[int][]int64{}}
+		expect: map[expectKey]int64{}, fileLast: map[string]int64{}, heavy: map[string][]int64{}, lineLog: map[int][]int64{},
+		byteWin: map[int]*window{}, mnRepoWin: map[int]*window{}, sendSlots: make(chan struct{}, maxSendsAtOnce)}
 	e.Dial = func(addr string, to time.Duration) (net.Conn, error) { return net.DialTimeout("tcp", addr, to) }
 	n.Consensus = e.GetConsensus
 	n.ServerOn = func() bool { e.mu.Lock(); defer e.mu.Unlock(); return e.serverOn }
@@ -203,10 +208,13 @@ func (e *Engine) NodeStatusString() string {
 		codec.Copy(n.Headers.Hash(), 0, 5) + " " + node.MainnetVersion + node.NodeRelease + " " + n.UTCTimeStr() + " " +
 		codec.Copy(n.MNFile.Hash(), 0, 5) + " " + codec.IntToStr(int64(n.MNsListLen())) + " " +
 		n.MyLastBlockHash() + " null " + codec.IntToStr(last.TimeEnd) + " " + last.AccountMiner + " " +
-		codec.IntToStr(int64(n.ChecksCount())) + " " + codec.Parameter(last.Solution, 2) + " " +
-		codec.Parameter(last.Solution, 1) + " " + codec.Copy(n.Summary.Hash(), 0, 5) + " " +
+		codec.IntToStr(int64(n.ChecksCount())) + " " + orNull(codec.Parameter(last.Solution, 2)) + " " +
+		orNull(codec.Parameter(last.Solution, 1)) + " " + codec.Copy(n.Summary.Hash(), 0, 5) + " " +
 		codec.Copy(n.GVTs.Hash(), 0, 5) + " " + codec.Copy(n.CFG.Hash(), 0, 5) + " " +
-		codec.Copy(n.PSOs.FileHash(), 0, 5)
+		codec.Copy(n.PSOs.FileHash(), 0, 5) + " " +
+		// full hashes, items 21..26 of the consensus (C-03, H-06)
+		n.Headers.Hash() + " " + n.MNFile.Hash() + " " + n.Summary.Hash() + " " + n.GVTs.Hash() + " " +
+		n.CFG.Hash() + " " + n.PSOs.FileHash()
 }
 
 func (e *Engine) engineLastUpdateValue() int64 {
@@ -294,8 +302,12 @@ func indexOf(s, sub string) int {
 
 var _ = consensus.SecondsPerBlock
 
+// expectKey names an outstanding request. FIX: it is bound to the slot
+// object of the connection the request went out on, not to the slot number,
+// so a connection that replaces a closed one in the same slot inherits
+// nothing.
 type expectKey struct {
-	slot int
+	s    *slot
 	kind string
 }
 
@@ -305,16 +317,40 @@ const replyWindow = 60
 // expectReply records that we asked slot for `kind`. FIX(C-01, C-02, H-05,
 // H-06): transfers and configuration are accepted only as answers.
 func (e *Engine) expectReply(slot int, kind string) {
+	s := e.slotObj(slot)
+	if s == nil {
+		return
+	}
 	e.expMu.Lock()
-	e.expect[expectKey{slot, kind}] = e.N.UTCTime() + replyWindow
+	e.expect[expectKey{s, kind}] = e.N.UTCTime() + replyWindow
 	e.expMu.Unlock()
+}
+
+// forgetSlot drops everything remembered about a closed connection.
+func (e *Engine) forgetSlot(s *slot, i int) {
+	e.expMu.Lock()
+	for k := range e.expect {
+		if k.s == s {
+			delete(e.expect, k)
+		}
+	}
+	e.expMu.Unlock()
+	e.limMu.Lock()
+	delete(e.lineLog, i)
+	delete(e.byteWin, i)
+	delete(e.mnRepoWin, i)
+	e.limMu.Unlock()
 }
 
 // takeReply consumes an outstanding expectation.
 func (e *Engine) takeReply(slot int, kind string) bool {
+	s := e.slotObj(slot)
+	if s == nil {
+		return false
+	}
 	e.expMu.Lock()
 	defer e.expMu.Unlock()
-	k := expectKey{slot, kind}
+	k := expectKey{s, kind}
 	exp, ok := e.expect[k]
 	delete(e.expect, k)
 	return ok && exp >= e.N.UTCTime()
@@ -383,4 +419,66 @@ func (e *Engine) lineBudget(slot int) bool {
 	}
 	e.lineLog[slot] = append(l, now)
 	return true
+}
+
+// Per-peer budgets against memory exhaustion (M-07). A line is capped by
+// command, and each slot has a byte budget and a $MNREPO budget.
+const (
+	maxLineDefault   = 64 << 10        // ORDER, $MNCHECK, GETHEADUPDATE ... are small
+	maxLineMNRepo    = 2 << 10         // a masternode report
+	maxLineMNFile    = maxMNText + 512 // the only large line
+	byteBudget       = 16 << 20        // bytes of protocol lines per slot and window
+	byteWindow       = 10              // seconds
+	mnRepoBudget     = 3000            // $MNREPO lines per slot and window
+	mnRepoWindow     = 600             // seconds
+	maxIncomingBytes = 8 << 20         // queued, unprocessed lines per slot
+	maxSendsAtOnce   = 8
+)
+
+type window struct {
+	start int64
+	n     int
+}
+
+// charge adds amount to the slot's counter and reports whether it is still
+// within limit for the current window of span seconds.
+func (e *Engine) charge(m map[int]*window, slot, amount, span, limit int) bool {
+	now := e.N.UTCTime()
+	e.limMu.Lock()
+	defer e.limMu.Unlock()
+	w := m[slot]
+	if w == nil || now >= w.start+int64(span) {
+		w = &window{start: now}
+		m[slot] = w
+	}
+	w.n += amount
+	return w.n <= limit
+}
+
+// lineAllowed applies the size and budget rules to one received line.
+func (e *Engine) lineAllowed(sl int, line string) bool {
+	max := maxLineDefault
+	switch strings.ToUpper(codec.Parameter(line, 4)) {
+	case "MNFILE":
+		max = maxLineMNFile
+	case "$MNREPO":
+		max = maxLineMNRepo
+		if !e.charge(e.mnRepoWin, sl, 1, mnRepoWindow, mnRepoBudget) {
+			return false
+		}
+	}
+	if len(line) > max {
+		return false
+	}
+	return e.charge(e.byteWin, sl, len(line), byteWindow, byteBudget)
+}
+
+// orNull keeps a status field from vanishing when it is empty (the genesis
+// block has no solution): fields are separated by blanks, so an empty one
+// would shift every later field, including the full hashes.
+func orNull(s string) string {
+	if s == "" {
+		return "null"
+	}
+	return s
 }

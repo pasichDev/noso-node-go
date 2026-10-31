@@ -27,8 +27,9 @@ func TestFraming(t *testing.T) {
 	if l, _ := cb.ReadLine(time.Second); l != "bare-lf" {
 		t.Fatal("LF only line must be accepted")
 	}
-	if l, err := cb.ReadLine(time.Second); err != nil || l != "last-no-eol" {
-		t.Fatalf("%q %v", l, err)
+	// a line cut off by the end of the connection is an error (Indy raises)
+	if l, err := cb.ReadLine(time.Second); err == nil {
+		t.Fatalf("truncated line accepted: %q", l)
 	}
 }
 

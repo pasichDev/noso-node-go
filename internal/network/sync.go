@@ -191,7 +191,7 @@ func (e *Engine) SyncWithMainnet() {
 	}
 	// summary
 	if codec.Copy(n.Headers.Hash(), 0, 5) == e.GetConsensus(CHeaders) && myLast == nlbv &&
-		n.Summary.Hash() != e.GetConsensus(CSumHash) {
+		codec.Copy(n.Summary.Hash(), 0, 5) != e.GetConsensus(CSumHash) {
 		if n.Summary.LastOp()+2*consensus.SumMarkInterval < myLast {
 			if e.lastTimeRequestSumary+5 < now && !e.downloadSumary {
 				if s, ok := e.ValidSlotForSeed(); ok {

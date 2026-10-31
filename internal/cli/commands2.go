@@ -581,7 +581,7 @@ func cmdConsensus(d *Dispatcher, l string) {
 	if !d.needNet() {
 		return
 	}
-	s := d.E.ConsStats
+	s := d.E.ConsStats()
 	d.log("(%d / %d) %d %%", s.ReachedNodes, s.TotalNodes, s.Percentage)
 	for i, v := range d.E.ConsensusItems() {
 		name := ""

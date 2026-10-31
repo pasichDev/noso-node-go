@@ -1,7 +1,10 @@
 package network
 
 import (
+	"archive/zip"
+	"bytes"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"time"
@@ -333,6 +336,9 @@ func (e *Engine) handleLine(sl int, c *Conn, line string, client bool) bool {
 		}
 		return e.receiveFile(sl, c, kind)
 	}
+	if len(line) > maxLineMNFile {
+		return false
+	}
 	if !client {
 		// IdTCPServer1Execute direct handlers (masterpaskalform.pas:2470-2582).
 		ip := e.peers.get(sl).IP
@@ -373,33 +379,55 @@ func (e *Engine) handleLine(sl int, c *Conn, line string, client bool) bool {
 			return false // unexpected line: the connection is closed
 		}
 	}
-	if !e.lineBudget(sl) { // FIX(M-07): per-peer line budget
+	if !e.lineBudget(sl) || !e.lineAllowed(sl, line) { // FIX(M-07): per-peer line, size and byte budgets
 		return false
 	}
-	e.addIncoming(sl, line)
-	return true
+	return e.addIncoming(sl, line)
 }
 
-// receiveFile reads and validates one requested file. Nothing is stored
-// unless it matches the full hash the peer advertised in its PING and the
-// 5-character consensus value.
+// fullHashOK reports whether h is the full hash the seeds voted for item idx.
+// An empty vote never matches: without a majority nothing is accepted.
+func (e *Engine) fullHashOK(idx int, h string) bool {
+	v := e.GetConsensus(idx)
+	return v != "" && v == h
+}
+
+// receiveFile reads and validates one requested file. FIX(C-03, H-06,
+// H-11): the transfer is read without holding the engine lock, so a slow or
+// silent peer costs only its own connection; a state file is stored only if
+// its full 128-bit hash equals the value more than half of the configured
+// seeds report, never because of what the sending peer says about itself.
 func (e *Engine) receiveFile(sl int, c *Conn, kind string) bool {
 	n := e.N
-	e.big.Lock()
-	defer e.big.Unlock()
-	peer := e.peers.get(sl)
-	consOK := func(idx int, data []byte) bool {
-		h := crypto.IDHashBytes(data)
-		return codec.Copy(h, 0, 5) == e.GetConsensus(idx)
-	}
-	read := func(max int) ([]byte, bool) {
-		d, err := c.ReadStream(transferTime, max)
-		return d, err == nil
-	}
+	var max int
 	switch kind {
 	case "RESUMEN":
-		data, ok := read(maxHeadersFile)
-		if !ok || len(data)%types.ResumenSize != 0 || crypto.IDHashBytes(data) != peer.ResumenHash || !consOK(CHeaders, data) {
+		max = maxHeadersFile
+	case "SUMARY":
+		max = maxSummaryFile
+	case "GVTS":
+		max = maxGVTFile
+	case "PSOS":
+		max = maxPSOFile
+	case "BLOCKS":
+		max = maxBlockZip
+	default:
+		return false
+	}
+	data, err := c.ReadStream(transferTime, max)
+	if err != nil {
+		return false
+	}
+	h := crypto.IDHashBytes(data)
+	var blocksOK bool
+	if kind == "BLOCKS" {
+		blocksOK = e.blocksMatchHeaders(data)
+	}
+	e.big.Lock()
+	defer e.big.Unlock()
+	switch kind {
+	case "RESUMEN":
+		if len(data)%types.ResumenSize != 0 || !e.fullHashOK(CFullHeaders, h) {
 			return false
 		}
 		if !e.headersAgreeWithBlocks(data) { // FIX(H-05)
@@ -407,12 +435,12 @@ func (e *Engine) receiveFile(sl int, c *Conn, kind string) bool {
 		}
 		e.downloadHeaders = true
 		n.Headers.Replace(data)
+		n.Headers.SetHash()
 		n.UpdateMyData()
 		e.lastTimeRequestResumen = 0
 		e.downloadHeaders = false
 	case "SUMARY":
-		data, ok := read(maxSummaryFile)
-		if !ok || len(data)%types.SummarySize != 0 || crypto.IDHashBytes(data) != peer.SumarioHash || !consOK(CSumHash, data) {
+		if len(data)%types.SummarySize != 0 || !e.fullHashOK(CFullSummary, h) {
 			return false
 		}
 		e.downloadSumary = true
@@ -422,8 +450,7 @@ func (e *Engine) receiveFile(sl int, c *Conn, kind string) bool {
 		e.downloadSumary = false
 		return err == nil
 	case "GVTS":
-		data, ok := read(maxGVTFile)
-		if !ok || len(data) != maxGVTFile || crypto.IDHashBytes(data) != peer.GVTsHash || !consOK(CGVTsHash, data) {
+		if len(data) != maxGVTFile || !e.fullHashOK(CFullGVTs, h) {
 			return false
 		}
 		if n.GVTs.Replace(data) {
@@ -431,9 +458,7 @@ func (e *Engine) receiveFile(sl int, c *Conn, kind string) bool {
 		}
 		e.lastTimeGVTsRequest = 0
 	case "PSOS":
-		data, ok := read(maxPSOFile)
-		if !ok || !storage.ValidPSOFile(data) || codec.Copy(crypto.IDHashBytes(data), 0, 5) != peer.PSOHash ||
-			!consOK(20, data) {
+		if !storage.ValidPSOFile(data) || !e.fullHashOK(CFullPSO, h) {
 			return false
 		}
 		if n.PSOs.Replace(data) {
@@ -442,8 +467,8 @@ func (e *Engine) receiveFile(sl int, c *Conn, kind string) bool {
 		}
 		e.lastTimePSOsRequest = 0
 	case "BLOCKS":
-		data, ok := read(maxBlockZip)
-		if !ok {
+		if !blocksOK {
+			e.logf("events", "blocks refused: not the blocks the headers name")
 			return false
 		}
 		e.downloadBlocks = true
@@ -454,6 +479,53 @@ func (e *Engine) receiveFile(sl int, c *Conn, kind string) bool {
 		}
 		e.lastTimeRequestBlock = 0
 		e.downloadBlocks = false
+	}
+	return true
+}
+
+// blocksMatchHeaders checks every block of a received archive against the
+// header record of that number (which the seeds' full headers hash vouches
+// for): the block file's identity hash must equal the recorded BlockHash.
+// FIX(C-03): StageBlocks validated the contents but never tied a block to
+// the headers, so a peer could supply a well-formed block that differs from
+// the chain. Entries are bounded the same way StageBlocks bounds them.
+func (e *Engine) blocksMatchHeaders(data []byte) bool {
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil || len(zr.File) > 128 {
+		return false
+	}
+	hdr, err := e.N.Headers.Bytes()
+	if err != nil {
+		return false
+	}
+	var total uint64
+	for _, f := range zr.File {
+		name := f.Name
+		if !strings.HasSuffix(name, ".blk") {
+			return false
+		}
+		num := codec.StrToInt64Def(strings.TrimSuffix(name, ".blk"), -1)
+		total += f.UncompressedSize64
+		if num < 0 || f.UncompressedSize64 > 8<<20 || total > 64<<20 {
+			return false
+		}
+		off := num * int64(types.ResumenSize)
+		if off+int64(types.ResumenSize) > int64(len(hdr)) {
+			return false // no header for this block
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return false
+		}
+		raw, err := io.ReadAll(io.LimitReader(rc, 8<<20+1))
+		rc.Close()
+		if err != nil || len(raw) > 8<<20 {
+			return false
+		}
+		r := types.DecodeResumen(hdr[off:])
+		if int64(r.Block) != num || r.BlockHash != crypto.IDHashBytes(raw) {
+			return false
+		}
 	}
 	return true
 }
@@ -638,20 +710,33 @@ func (e *Engine) SendPendings(sl int) {
 	}
 }
 
+// sendFile answers a file request. FIX(H-11): the file is read here (the
+// caller holds the heartbeat lock) but written by a goroutine of its own, so
+// a peer that reads slowly cannot stall the heartbeat; each slot has at most
+// one transfer going and the node at most maxSendsAtOnce.
 func (e *Engine) sendFile(sl int, label string, get func() ([]byte, error)) {
-	e.peers.mu.Lock()
-	s := e.peers.slots[sl]
-	e.peers.mu.Unlock()
-	if s == nil || s.conn == nil {
+	s := e.slotObj(sl)
+	if s == nil || s.conn == nil || !s.sending.CompareAndSwap(0, 1) {
+		return
+	}
+	select {
+	case e.sendSlots <- struct{}{}:
+	default:
+		s.sending.Store(0)
 		return
 	}
 	raw, err := get()
 	if err != nil {
 		raw = nil // Pascal sends an empty stream when the load failed
 	}
-	if err := s.conn.WriteStream(label, raw); err != nil {
-		e.CloseSlot(sl)
-	}
+	e.wg.Add(1)
+	go func() {
+		defer e.wg.Done()
+		defer func() { <-e.sendSlots; s.sending.Store(0) }()
+		if err := s.conn.WriteStream(label, raw); err != nil {
+			e.CloseSlot(sl)
+		}
+	}()
 }
 
 func (e *Engine) sendResumen(sl int) {
@@ -686,10 +771,11 @@ func (e *Engine) sendUpdateHeaders(sl int, line string) {
 }
 
 // processMNFile mirrors PTC_ProcessMNFileIncoming: accepted only when the
-// MD5 of the text + CR LF matches the consensus MNs hash.
+// full hash of the text + CR LF equals the one the seeds voted for (H-06;
+// the original compared 5 characters).
 func (e *Engine) processMNFile(line string) {
 	text := codec.ExtractMNsText(line)
-	if codec.Copy(crypto.IDHash(text+"\r\n"), 1, 5) == e.GetConsensus(CMNsHash) {
+	if e.fullHashOK(CFullMNs, crypto.IDHash(text+"\r\n")) {
 		e.N.MNFile.Save(text)
 	}
 }
@@ -713,32 +799,50 @@ func (e *Engine) processCFGData(line string) {
 	e.logf("events", "Noso CFG updated!")
 }
 
-// headUpdate mirrors PTC_HeadUpdate (mpprotocol.pas:1127-1172).
+// headUpdate mirrors PTC_HeadUpdate (mpprotocol.pas:1127-1172). FIX(H-05):
+// the new records are appended to a copy in memory; the headers file is
+// replaced only when the result has the full hash the seeds voted for and
+// agrees with the blocks we hold. The original appended first and compared
+// afterwards, leaving junk records on disk.
 func (e *Engine) headUpdate(line string) {
 	n := e.N
-	if n.Headers.Hash() == e.GetConsensus(CHeaders) {
+	want := e.GetConsensus(CFullHeaders)
+	if want == "" || n.Headers.Hash() == want {
 		return
 	}
+	cur, err := n.Headers.Bytes()
+	if err != nil || len(cur)%types.ResumenSize != 0 {
+		return
+	}
+	next := int64(n.Headers.LastBlock()) + 1
+	cand := append([]byte(nil), cur...)
 	content := codec.ExtractMNsText(line)
-	for i := int64(0); ; i++ {
+	for i := int64(0); i < 2000; i++ {
 		h := codec.Parameter(content, i)
 		if h == "" {
 			break
 		}
 		h = strings.ReplaceAll(h, ":", " ")
 		num := codec.StrToIntDef(codec.Parameter(h, 0), 0)
-		if num == int64(n.Headers.LastBlock())+1 {
-			n.Headers.Add(num, codec.Parameter(h, 1), codec.Parameter(h, 2))
+		if num != next {
+			continue
 		}
+		bh, sh := codec.Parameter(h, 1), codec.Parameter(h, 2)
+		if len(bh) != 32 || len(sh) != 32 {
+			break
+		}
+		cand = append(cand, types.Resumen{Block: int32(num), BlockHash: bh, SumHash: sh}.Encode()...)
+		next++
 	}
-	n.Headers.SetHash()
-	if codec.Copy(n.Headers.Hash(), 0, 5) != e.GetConsensus(CHeaders) {
+	if crypto.IDHashBytes(cand) != want || !e.headersAgreeWithBlocks(cand) {
 		e.forceCompleteHeadersDownload = true
 		e.logf("console", "Update headers failed")
-	} else {
-		e.logf("console", "Headers Updated!")
-		e.forceCompleteHeadersDownload = false
+		return
 	}
+	n.Headers.Replace(cand)
+	n.Headers.SetHash()
+	e.logf("console", "Headers Updated!")
+	e.forceCompleteHeadersDownload = false
 }
 
 // ptcAdminMsg handles `ADMINMSG <seq> <expiryBlock> <text_with_underscores>

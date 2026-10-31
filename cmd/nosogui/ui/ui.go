@@ -331,7 +331,7 @@ func (a *App) slotRowsNow() [][]string {
 }
 
 func (a *App) consRowsNow() [][]string {
-	s := a.e.ConsStats
+	s := a.e.ConsStats()
 	rows := [][]string{{"#", "Item", "Value"}, {"", "Reached/Total", fmt.Sprintf("%d / %d (%d%%)", s.ReachedNodes, s.TotalNodes, s.Percentage)}}
 	for i, v := range a.e.ConsensusItems() {
 		name := ""

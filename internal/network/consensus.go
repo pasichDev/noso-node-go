@@ -23,10 +23,28 @@ const (
 	CCFGHash   = 19
 )
 
+// Full-hash consensus items, appended after the original 21. They carry the
+// complete 128-bit identity hash of the state files, voted by the seeds
+// like every other item but accepted only when more than half of ALL
+// configured seeds agree. A downloaded state file is stored only if its
+// full hash equals one of these, so the source of the file (any peer, even
+// the one that advertises a matching hash in its PING) has no say. This
+// replaces the original 5-character (20-bit) comparison that a grind can
+// satisfy (docs/compatibility.md, C-03, H-06).
+const (
+	CFullHeaders = 21 + iota
+	CFullMNs
+	CFullSummary
+	CFullGVTs
+	CFullCFG
+	CFullPSO
+)
+
 // NConsensus names the consensus items (nosoconsensus.pas:78-82).
-var NConsensus = [21]string{"Resume", "Peers", "LBlock", "Pending", "Delta", "Headers", "Version",
+var NConsensus = [27]string{"Resume", "Peers", "LBlock", "Pending", "Delta", "Headers", "Version",
 	"UTCTime", "MNsHash", "MNsCount", "LBHash", "BestDiff", "LBTimeEnd", "LBMiner", "ChecksCount",
-	"LBPoW", "LBDiff", "Summary", "GVTs", "NosoCFG", "PSOHash"}
+	"LBPoW", "LBDiff", "Summary", "GVTs", "NosoCFG", "PSOHash",
+	"HeadersFull", "MNsFull", "SummaryFull", "GVTsFull", "NosoCFGFull", "PSOHashFull"}
 
 type nodeConsensus struct {
 	host   string
@@ -62,6 +80,13 @@ func (e *Engine) GetConsensus(i int) string {
 	return e.cons[i]
 }
 
+// ConsStats returns the statistics of the last consensus round.
+func (e *Engine) ConsStats() ConsensusStats {
+	e.consMu.Lock()
+	defer e.consMu.Unlock()
+	return e.consStats
+}
+
 // ConsensusItems returns a copy of every consensus item.
 func (e *Engine) ConsensusItems() []string {
 	e.consMu.Lock()
@@ -80,8 +105,9 @@ func (e *Engine) SetNodesArray(list string) {
 			item = strings.ReplaceAll(item, ";", " ")
 			nc := nodeConsensus{host: codec.Parameter(item, 0), port: int(codec.StrToIntDef(codec.Parameter(item, 1), 8080))}
 			// FIX(H-04): a seed listed twice counted twice in the vote
-			// (the default list repeats an address).
-			if k := nc.host + ":" + codec.IntToStr(int64(nc.port)); !seen[k] && nc.host != "" {
+			// (the default list repeats an address). One host counts once
+			// whatever its port.
+			if k := nc.host; !seen[k] && nc.host != "" {
 				seen[k] = true
 				arr = append(arr, nc)
 			}
@@ -241,14 +267,14 @@ func (e *Engine) CalculateConsensus() []string {
 		res := make([]string, len(NConsensus))
 		e.consMu.Lock()
 		e.cons = res
-		e.ConsStats = stats
+		e.consStats = stats
 		e.lastConsensusTime -= 50
 		e.consMu.Unlock()
 		return res
 	}
 	result := []string{conHash}
 	valid := 0
-	for param := int64(1); ; param++ {
+	for param := int64(1); param < int64(len(NConsensus)); param++ {
 		arr = nil
 		for _, nd := range nodes {
 			if codec.Parameter(nd.data, 0) == conHash {
@@ -259,10 +285,16 @@ func (e *Engine) CalculateConsensus() []string {
 			}
 		}
 		h := highest(arr)
-		if h == "" {
+		if param >= CFullHeaders && topCount*2 <= len(nodes) {
+			h = "" // full hashes need a majority of all configured seeds
+		}
+		if h == "" && param < CFullHeaders {
 			break
 		}
 		result = append(result, h)
+	}
+	for len(result) < len(NConsensus) {
+		result = append(result, "")
 	}
 	stats.ValidNodes = valid
 	if reachedN > 0 {
@@ -271,7 +303,7 @@ func (e *Engine) CalculateConsensus() []string {
 	stats.Completed = true
 	e.consMu.Lock()
 	e.cons = result
-	e.ConsStats = stats
+	e.consStats = stats
 	e.consMu.Unlock()
 	return result
 }

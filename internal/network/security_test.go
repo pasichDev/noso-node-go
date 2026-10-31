@@ -125,7 +125,7 @@ func TestH04_QuorumAndDedupe(t *testing.T) {
 		t.Fatal("single reachable seed of one must be a quorum")
 	}
 	// one of three seeds answers: no quorum
-	b.SetNodesArray("127.0.0.1;" + port + ":127.0.0.1;1:127.0.0.1;2:")
+	b.SetNodesArray("127.0.0.1;" + port + ":127.0.0.2;1:127.0.0.3;2:")
 	if c := b.CalculateConsensus(); c[0] != "" {
 		t.Fatal("H-04: a minority of the configured seeds produced a consensus")
 	}

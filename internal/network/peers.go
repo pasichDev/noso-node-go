@@ -2,6 +2,7 @@ package network
 
 import (
 	"sync"
+	"sync/atomic"
 
 	"github.com/pasichDev/noso-node-go/internal/codec"
 	"github.com/pasichDev/noso-node-go/internal/crypto"
@@ -41,6 +42,8 @@ type slot struct {
 	conn     *Conn
 	out      chan string
 	incoming []string
+	inBytes  int // size of the queued incoming lines
+	sending  atomic.Int32
 	closed   chan struct{}
 	once     sync.Once
 }
@@ -134,6 +137,7 @@ func (e *Engine) CloseSlot(i int) {
 	if s == nil {
 		return
 	}
+	e.forgetSlot(s, i)
 	s.once.Do(func() {
 		close(s.closed)
 		if s.conn != nil {
@@ -212,14 +216,31 @@ func (e *Engine) OutgoingAdd(line string) {
 	}
 }
 
-func (e *Engine) addIncoming(i int, line string) {
-	e.peers.mu.Lock()
-	if s := e.peers.slots[i]; s != nil {
-		if len(s.incoming) < 10000 { // hardening: bounded queue
-			s.incoming = append(s.incoming, line)
-		}
+// slotObj returns the slot object of a number, nil when empty.
+func (e *Engine) slotObj(i int) *slot {
+	if i < 1 || i > MaxConnections {
+		return nil
 	}
-	e.peers.mu.Unlock()
+	e.peers.mu.Lock()
+	defer e.peers.mu.Unlock()
+	return e.peers.slots[i]
+}
+
+// addIncoming queues a received line; it reports false when the queue of
+// that slot is over its count or byte bound (M-07).
+func (e *Engine) addIncoming(i int, line string) bool {
+	e.peers.mu.Lock()
+	defer e.peers.mu.Unlock()
+	s := e.peers.slots[i]
+	if s == nil {
+		return true
+	}
+	if len(s.incoming) >= 10000 || s.inBytes+len(line) > maxIncomingBytes {
+		return false
+	}
+	s.incoming = append(s.incoming, line)
+	s.inBytes += len(line)
+	return true
 }
 
 func (e *Engine) popIncoming(i int) (string, bool) {
@@ -231,6 +252,7 @@ func (e *Engine) popIncoming(i int) (string, bool) {
 	}
 	l := s.incoming[0]
 	s.incoming = s.incoming[1:]
+	s.inBytes -= len(l)
 	return l, true
 }
 
