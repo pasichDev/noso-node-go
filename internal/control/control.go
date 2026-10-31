@@ -29,14 +29,27 @@ func SocketPath(dataDir string) string {
 		abs = dataDir
 	}
 	sum := sha256.Sum256([]byte(abs))
-	return filepath.Join(os.TempDir(), "nosod-"+hex.EncodeToString(sum[:4])+".sock")
+	return filepath.Join(os.TempDir(), "nosod-"+hex.EncodeToString(sum[:4]), "s.sock")
 }
+
+// MaxLine bounds one command line.
+const MaxLine = 64 << 10
 
 // Runner executes a command and streams its output.
 type Runner func(line string, out func(string))
 
 // Serve listens on path until the listener is closed.
 func Serve(path string, run Runner) (net.Listener, error) {
+	// FIX: the socket lives in a directory only the owner can enter, so the
+	// moment between creating the socket and its chmod is not reachable by
+	// other users.
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return nil, err
+	}
 	_ = os.Remove(path)
 	ln, err := net.Listen("unix", path)
 	if err != nil {
@@ -52,7 +65,8 @@ func Serve(path string, run Runner) (net.Listener, error) {
 			go func() {
 				defer c.Close()
 				_ = c.SetDeadline(time.Now().Add(10 * time.Minute))
-				r := bufio.NewReaderSize(c, 64<<10)
+				// FIX: the command line is bounded (it was read without limit).
+				r := bufio.NewReaderSize(io.LimitReader(c, MaxLine), 4<<10)
 				line, err := r.ReadString('\n')
 				if err != nil && line == "" {
 					return

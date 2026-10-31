@@ -282,10 +282,9 @@ func zipOf(t *testing.T, files map[string][]byte) []byte {
 
 // C-02: archive hygiene. C-03: blocks must validate.
 func TestC02_C03_StageBlocks(t *testing.T) {
-	a, nowA, wa := fundedNode(t)
-	// a second node with the same genesis, behind by one block
-	var nowB int64 = *nowA
-	b := newTestNode(t, &nowB)
+	bd := newBed(t, 2)
+	a, b := bd.nodes[0], bd.nodes[1]
+	bd.build(a)
 	blk1 := mustRead(t, a.Lay.BlockFile(1))
 
 	for _, name := range []string{"../evil.blk", "NOSODATA/BLOCKS/1.blk", "/etc/passwd", "1.txt", "sub/1.blk"} {
@@ -314,15 +313,10 @@ func TestC02_C03_StageBlocks(t *testing.T) {
 		t.Fatal("invalid block stored")
 	}
 	// a valid block is stored
-	nowB = *nowA
 	if cnt, err := b.StageBlocks(zipOf(t, map[string][]byte{"1.blk": blk1})); err != nil || cnt != 1 || b.MyLastBlock() != 1 {
 		t.Fatalf("valid block refused: %d %v", cnt, err)
 	}
-	if b.MyLastBlockHash() != a.MyLastBlockHash() {
-		t.Fatal("hash differs after staging")
-	}
-	// an unfunded transfer is detected when the summary is replayed
-	_ = wa
+	sameState(t, a, b)
 }
 
 // C-03: replay of an unfunded transfer rolls the block back.

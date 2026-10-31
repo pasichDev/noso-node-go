@@ -23,3 +23,7 @@ func itoa(v int64) string {
 	}
 	return string(b[i:])
 }
+
+func removeAll(p string) error { return os.RemoveAll(p) }
+
+func renameDir(from, to string) error { return os.Rename(from, to) }

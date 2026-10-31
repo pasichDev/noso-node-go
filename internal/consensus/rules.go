@@ -4,7 +4,11 @@
 // (truncating division, no overflow checks).
 package consensus
 
-import "strings"
+import (
+	"math"
+	"math/bits"
+	"strings"
+)
 
 // Chain constants (masterpaskalform.pas:586-615).
 const (
@@ -198,4 +202,60 @@ func NextBlockTimeStamp(utc int64) int64 { return utc + 600 - utc%600 }
 func IsBlockOpen(utc int64) bool {
 	a := BlockAge(utc)
 	return !(a < 10 || a > 585)
+}
+
+// ApplyBP returns amount*bps/10000 (truncating) without Int64 overflow; ok is
+// false for negative inputs or a result that does not fit. FIX(C-03): the
+// original multiplied unchecked (mpblock.pas:300-310).
+func ApplyBP(amount, bps int64) (int64, bool) {
+	if amount < 0 || bps < 0 {
+		return 0, false
+	}
+	hi, lo := bits.Mul64(uint64(amount), uint64(bps))
+	if hi >= 10000 {
+		return 0, false
+	}
+	q, _ := bits.Div64(hi, lo, 10000)
+	if q > math.MaxInt64 {
+		return 0, false
+	}
+	return int64(q), true
+}
+
+// MaxMasternodesPerBlock bounds the paid masternode list of one block.
+const MaxMasternodesPerBlock = 5000
+
+// Order caps of one block. TRFR and CUSTOM share the original 2000 limit
+// (mpblock.pas:186); SNDGVT and the project payment have their own caps so
+// that an honest builder can never produce a block the validator refuses.
+const (
+	MaxTransfersPerBlock = 2000
+	MaxGVTPerBlock       = 100
+)
+
+// Shares splits one block: the project payment (from PoSBlockEnd), the
+// masternode pay per node and the miner's remainder. FIX(M-10, C-03): the
+// configuration mode no longer takes part (the original read MNSONLY from the
+// local configuration, mpblock.pas:312), so every node derives the same
+// split from the chain alone. ok is false when an amount does not fit.
+func Shares(number, reward, fees int64, masternodes int) (dev, mnsPay, mnsTotal, pow int64, ok bool) {
+	gross, okAdd := CheckedAdd(reward, fees)
+	if !okAdd {
+		return 0, 0, 0, 0, false
+	}
+	if number >= PoSBlockEnd {
+		if dev, ok = ApplyBP(gross, GetDevPercentage(number)); !ok {
+			return
+		}
+	}
+	if number >= MNBlockStart && masternodes > 0 {
+		pool, okPool := ApplyBP(gross, GetMNsPercentage(number, ""))
+		if !okPool {
+			return 0, 0, 0, 0, false
+		}
+		mnsPay = pool / int64(masternodes)
+		mnsTotal = mnsPay * int64(masternodes)
+	}
+	pow = gross - dev - mnsTotal
+	return dev, mnsPay, mnsTotal, pow, pow >= 0
 }

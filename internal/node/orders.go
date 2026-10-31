@@ -2,6 +2,7 @@ package node
 
 import (
 	"strings"
+	"sync"
 
 	"github.com/pasichDev/noso-node-go/internal/codec"
 	"github.com/pasichDev/noso-node-go/internal/consensus"
@@ -43,13 +44,46 @@ func VerifyOrder(o types.Order) int {
 	if crypto.GetAddressFromPublicKey(o.Sender, 0) != o.Address {
 		return 14
 	}
-	if !crypto.VerifyCanonical(o.Sender, o.Signature, "ORDER1", OrderFields(o, o.Address)...) {
-		return 6
-	}
 	if o.TrfrID != OrderTrfrID(o, o.Address) {
 		return 13
 	}
+	// A signature is checked once: pool admission and block validation ask
+	// about the same order, and an ECDSA verification costs milliseconds.
+	key := crypto.SHA256String(o.Sender + "|" + o.Signature + "|" + o.TrfrID)
+	if verified.has(key) {
+		return 0
+	}
+	if !crypto.VerifyCanonical(o.Sender, o.Signature, "ORDER1", OrderFields(o, o.Address)...) {
+		return 6
+	}
+	verified.add(key)
 	return 0
+}
+
+// verified remembers orders whose signature checked out. The key covers the
+// public key, the signature and the TrfrID, which is derived from every
+// signed field, so a changed order is a cache miss.
+var verified = &sigCache{m: map[string]struct{}{}}
+
+type sigCache struct {
+	mu sync.Mutex
+	m  map[string]struct{}
+}
+
+func (c *sigCache) has(k string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.m[k]
+	return ok
+}
+
+func (c *sigCache) add(k string) {
+	c.mu.Lock()
+	if len(c.m) >= 1<<14 {
+		c.m = map[string]struct{}{}
+	}
+	c.m[k] = struct{}{}
+	c.mu.Unlock()
 }
 
 // ValidAlias applies the alias rules of CustomizeAddress (mpparser.pas:

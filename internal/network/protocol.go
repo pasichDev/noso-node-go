@@ -419,10 +419,6 @@ func (e *Engine) receiveFile(sl int, c *Conn, kind string) bool {
 		return false
 	}
 	h := crypto.IDHashBytes(data)
-	var blocksOK bool
-	if kind == "BLOCKS" {
-		blocksOK = e.blocksMatchHeaders(data)
-	}
 	e.big.Lock()
 	defer e.big.Unlock()
 	switch kind {
@@ -437,6 +433,7 @@ func (e *Engine) receiveFile(sl int, c *Conn, kind string) bool {
 		n.Headers.Replace(data)
 		n.Headers.SetHash()
 		n.UpdateMyData()
+		e.forceCompleteHeadersDownload = false // nosonetwork.pas:703-704
 		e.lastTimeRequestResumen = 0
 		e.downloadHeaders = false
 	case "SUMARY":
@@ -467,10 +464,9 @@ func (e *Engine) receiveFile(sl int, c *Conn, kind string) bool {
 		}
 		e.lastTimePSOsRequest = 0
 	case "BLOCKS":
-		if !blocksOK {
-			e.logf("events", "blocks refused: not the blocks the headers name")
-			return false
-		}
+		// FIX(C-03, M-10): blocks are not matched against downloaded headers
+		// (those are derived data and a competing branch has other hashes);
+		// node.StageBlocks authenticates and applies every block itself.
 		e.downloadBlocks = true
 		if _, err := n.StageBlocks(data); err != nil {
 			e.logf("events", "blocks refused: "+err.Error())

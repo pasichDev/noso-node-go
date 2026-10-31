@@ -57,7 +57,19 @@ type Node struct {
 	lastBlock   types.BlockHeader
 	conStatus   int // MyConStatus 0..3
 	building    int64
-	undoHighest int64
+	lastExpired int
+	rebuiltFor  int64
+
+	// chainMu serialises everything that changes the chain or the state
+	// files: block build, block acceptance, undo, rebuild. Console commands
+	// call the same public methods, so they queue behind a build.
+	chainMu    sync.Mutex
+	chainState struct {
+		mu        sync.Mutex
+		proposers []string
+		corrupt   bool
+		probe     bool
+	}
 
 	poolMu sync.Mutex
 	pool   []types.Order
@@ -92,11 +104,15 @@ type Config struct {
 	// FetchSeeds downloads the default seed list on first start (nil: none).
 	FetchSeeds func() string
 	// WalletPassphrase encrypts the wallet (FIX(H-10)): wallet.enc is used,
-	// and a legacy wallet.pkw is migrated into it and destroyed.
+	// and a legacy wallet.pkw is migrated into it (and kept until the
+	// operator retires it explicitly).
 	WalletPassphrase []byte
 	// InsecurePlainWallet keeps the original clear-text wallet.pkw. It exists
 	// for tests and must be asked for explicitly.
 	InsecurePlainWallet bool
+	// WalletReadOnly opens the wallet without writing anything (status
+	// style commands).
+	WalletReadOnly bool
 }
 
 // NewWithConfig opens (and creates when missing) the data directory like
@@ -116,18 +132,15 @@ func NewWithConfig(root string, cfg Config) (*Node, error) {
 	n.MNFile = storage.OpenMNFile(n.Lay.Masternodes)
 	n.GVTs = storage.OpenGVTs(n.Lay.GVTs)
 	n.CFG = storage.OpenCFG(n.Lay.CFG, n.UTCTime, fetchSeeds)
-	switch {
-	case len(cfg.WalletPassphrase) > 0:
-		w, err := storage.OpenWalletEncrypted(n.Lay.Wallet, cfg.WalletPassphrase)
-		if err != nil {
-			return nil, err
-		}
-		n.Wallet = w
-	case cfg.InsecurePlainWallet:
-		n.Wallet, _ = storage.OpenWallet(n.Lay.Wallet)
-	default:
+	if len(cfg.WalletPassphrase) == 0 && !cfg.InsecurePlainWallet {
 		return nil, ErrNoPassphrase
 	}
+	w, err := storage.OpenWalletFor(n.Lay.Wallet, cfg.WalletPassphrase, cfg.InsecurePlainWallet,
+		storage.WalletOpenOptions{ReadOnly: cfg.WalletReadOnly})
+	if err != nil {
+		return nil, err
+	}
+	n.Wallet = w
 	n.Blocks = storage.NewBlocks(n.Lay)
 	n.Summary = storage.OpenSummary(n.Lay.Summary)
 	if !storage.Exists(n.Lay.Summary) {
@@ -148,6 +161,8 @@ func NewWithConfig(root string, cfg Config) (*Node, error) {
 		n.CreateGenesis()
 	}
 	n.myLastBlock = n.Blocks.LastUpdated()
+	n.loadProposers()
+	n.noteTip(n.myLastBlock)
 	n.Wallet.ImportFromBackup(n.Lay.RPCBakDir)
 	n.UpdateMyData()
 	return n, nil

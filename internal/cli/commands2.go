@@ -599,7 +599,9 @@ func cmdConsensus(d *Dispatcher, l string) {
 
 func restoreSummary(d *Dispatcher) {
 	d.log("Restoring sumary from %d", ((d.N.Blocks.LastUpdated()/consensus.SumMarkInterval)-1)*consensus.SumMarkInterval)
-	_ = d.N.CompleteSummary()
+	if err := d.N.CompleteSummary(); err != nil {
+		d.log("complete summary: %v", err)
+	}
 }
 
 // cmdRestoreChain mirrors RestoreBlockChain (mpdisk.pas:795-807): the

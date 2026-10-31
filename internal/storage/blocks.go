@@ -27,13 +27,42 @@ type Block struct {
 	// Masternode tail, present when Number >= MNBlockStart.
 	MNsPay   int64
 	MNsAddrs []string
+	// V2 marks a block that carries the authentication trailer: the full
+	// public key of every order (Keys, parallel to Orders; empty for the
+	// project payment) and, when sealed, the proposer's key and signature
+	// over everything before the seal. Blocks without a trailer are legacy
+	// (Pascal) blocks and stay readable.
+	V2      bool
+	Keys    []string
+	SealKey string
+	SealSig string
 }
+
+// TrailerMagic starts the authentication trailer of a V2 block.
+const TrailerMagic = "NSG2"
 
 // ErrBlockShort is returned for truncated block files.
 var ErrBlockShort = errors.New("block file too short")
 
-// Encode serialises a block exactly like GuardarBloque (mpblock.pas:503-545).
+// Encode serialises a block exactly like GuardarBloque (mpblock.pas:503-545),
+// followed by the V2 trailer when present.
 func (b *Block) Encode() []byte {
+	out := b.SigningBytes()
+	if b.V2 {
+		out = appendStr16(out, b.SealKey)
+		out = appendStr16(out, b.SealSig)
+	}
+	return out
+}
+
+func appendStr16(out []byte, s string) []byte {
+	out = append(out, byte(len(s)>>8), byte(len(s)))
+	return append(out, s...)
+}
+
+// SigningBytes is everything the proposer's seal covers: the legacy body and
+// the key list of the trailer, but not the seal itself.
+func (b *Block) SigningBytes() []byte {
 	out := b.Header.Encode()
 	for _, o := range b.Orders {
 		out = append(out, o.Encode()...)
@@ -58,6 +87,13 @@ func (b *Block) Encode() []byte {
 			rec := make([]byte, types.PosAddrSize)
 			codec.PutShort(rec, 32, a)
 			out = append(out, rec...)
+		}
+	}
+	if b.V2 {
+		out = append(out, TrailerMagic...)
+		out = append(out, byte(len(b.Keys)>>24), byte(len(b.Keys)>>16), byte(len(b.Keys)>>8), byte(len(b.Keys)))
+		for _, k := range b.Keys {
+			out = appendStr16(out, k)
 		}
 	}
 	return out
@@ -108,7 +144,51 @@ func DecodeBlock(raw []byte) (*Block, error) {
 			return b, ErrBlockShort
 		}
 	}
+	if len(raw)-pos >= 8 && string(raw[pos:pos+4]) == TrailerMagic {
+		if err := b.decodeTrailer(raw[pos+4:]); err != nil {
+			return b, err
+		}
+	}
 	return b, nil
+}
+
+func (b *Block) decodeTrailer(raw []byte) error {
+	str := func() (string, bool) {
+		if len(raw) < 2 {
+			return "", false
+		}
+		l := int(raw[0])<<8 | int(raw[1])
+		if len(raw) < 2+l {
+			return "", false
+		}
+		s := string(raw[2 : 2+l])
+		raw = raw[2+l:]
+		return s, true
+	}
+	if len(raw) < 4 {
+		return ErrBlockShort
+	}
+	cnt := int(raw[0])<<24 | int(raw[1])<<16 | int(raw[2])<<8 | int(raw[3])
+	raw = raw[4:]
+	if cnt < 0 || cnt > len(raw)/2 {
+		return ErrBlockShort
+	}
+	for i := 0; i < cnt; i++ {
+		k, ok := str()
+		if !ok {
+			return ErrBlockShort
+		}
+		b.Keys = append(b.Keys, k)
+	}
+	var ok1, ok2 bool
+	if b.SealKey, ok1 = str(); !ok1 {
+		return ErrBlockShort
+	}
+	if b.SealSig, ok2 = str(); !ok2 || len(raw) != 0 {
+		return ErrBlockShort
+	}
+	b.V2 = true
+	return nil
 }
 
 // Blocks is the BLOCKS directory.

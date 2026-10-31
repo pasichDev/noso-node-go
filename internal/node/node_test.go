@@ -129,13 +129,17 @@ func TestBuildTransferBlockAndReplay(t *testing.T) {
 
 const storageGenesis = "N4PeJyqj8diSXnfhxSQdLpo8ddXTaGd"
 
-func TestPoSRangeDivisionByZero(t *testing.T) {
+// FIX(8425): the original divided by zero at block 8425 and stopped. The
+// chain has an explicit rule now: nobody is paid as a staker and the share
+// stays with the miner.
+func TestPoSRangeNoLongerStops(t *testing.T) {
 	now := int64(consensus.GenesysTimeStamp) + 600
 	n := newTestNode(t, &now)
 	n.SetMyLastBlock(8424)
 	now += 600
-	if _, err := n.BuildNewBlock(8425, now, "", "N1", "x"); err == nil || !strings.Contains(err.Error(), "division by zero") {
-		t.Fatalf("expected EDivByZero reproduction, got %v", err)
+	r, err := n.BuildNewBlock(8425, now, "", "N1", "x")
+	if err != nil || r == nil || r.Block.PosPay != 0 || len(r.Block.PosAddrs) != 0 {
+		t.Fatalf("block 8425: %v %v", r, err)
 	}
 }
 

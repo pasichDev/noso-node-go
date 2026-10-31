@@ -37,6 +37,25 @@ func (n *Node) SetPending(o []types.Order) {
 	n.poolMu.Unlock()
 }
 
+// replacePending sets the pool to keep, plus every order that arrived after
+// the snapshot `taken` was copied. FIX: the original (and the first port)
+// replaced the whole pool, losing orders added while a block was built.
+func (n *Node) replacePending(taken, keep []types.Order) {
+	was := map[string]bool{}
+	for _, o := range taken {
+		was[o.TrfrID] = true
+	}
+	n.poolMu.Lock()
+	defer n.poolMu.Unlock()
+	out := append([]types.Order(nil), keep...)
+	for _, o := range n.pool {
+		if !was[o.TrfrID] {
+			out = append(out, o)
+		}
+	}
+	n.pool = out
+}
+
 // TruncatePending mirrors the `setlength(ArrayPoolTXs,0)` of
 // VerifyConnectionStatus (mpred.pas:519-522) when the network reports
 // fewer pending orders than we hold.
@@ -155,7 +174,7 @@ func (n *Node) AddressAlreadyCustomized(addr string) bool {
 
 // AliasAlreadyExists mirrors mpcoin.pas:252-262.
 func (n *Node) AliasAlreadyExists(alias string) bool {
-	if slot, _ := n.Summary.GetIndexPosition(alias, true); slot >= 0 {
+	if n.Summary.AliasTaken(alias) {
 		return true
 	}
 	for _, o := range n.PendingCopy() {
@@ -369,7 +388,7 @@ func (n *Node) PTCCustom(line string) int {
 	if addr != o.Address {
 		code = 1
 	}
-	if o.AmmountFee != consensus.GetCustFee(n.MyLastBlock()) || o.AmmountTrf != 0 {
+	if o.AmmountFee != consensus.GetCustFee(n.MyLastBlock()+1) || o.AmmountTrf != 0 {
 		code = 9
 	}
 	if n.AddressAvailable(addr) < o.AmmountFee {
@@ -425,7 +444,7 @@ func (n *Node) PTCSendGVT(line string) int {
 	if addr != o.Address {
 		code = 1
 	}
-	if o.AmmountFee != consensus.GetCustFee(n.MyLastBlock()) || o.AmmountTrf != 0 {
+	if o.AmmountFee != consensus.GetCustFee(n.MyLastBlock()+1) || o.AmmountTrf != 0 {
 		code = 9
 	}
 	if n.AddressAvailable(addr) < o.AmmountFee {

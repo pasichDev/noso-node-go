@@ -9,8 +9,6 @@ import (
 	"regexp"
 
 	"github.com/pasichDev/noso-node-go/internal/codec"
-	"github.com/pasichDev/noso-node-go/internal/crypto"
-	"github.com/pasichDev/noso-node-go/internal/storage"
 )
 
 // ZipSummary mirrors ZipSumary (nosounit.pas:145-169): sumary.zip holds the
@@ -69,9 +67,10 @@ const (
 
 var blockEntryName = regexp.MustCompile(`^[0-9]{1,10}\.blk$`)
 
-// StageBlocks decodes a received archive in memory and stores the blocks
-// that validate, in order, starting right after our last block. Nothing is
-// extracted to disk by the archive itself. FIX(C-02, C-03): the original
+// StageBlocks decodes a received archive in memory and hands the blocks to
+// the chain rules (acceptRunLocked): they are validated, applied to the state
+// one by one and stored when they extend our chain or form a heavier branch.
+// Nothing is extracted to disk by the archive itself. FIX(C-02, C-03): the original
 // unzipped the peer's archive over the node directory with the paths chosen
 // by the peer (masterpaskalform.pas:2442-2469, nosogeneral.pas:565-584).
 // Only flat entries named <number>.blk are read; links, directories, parent
@@ -106,40 +105,7 @@ func (n *Node) StageBlocks(data []byte) (int, error) {
 		}
 		byNum[codec.StrToInt64Def(f.Name[:len(f.Name)-4], -1)] = raw
 	}
-	last := n.MyLastBlock()
-	prev := n.LastBlockData()
-	prevHash := n.MyLastBlockHash()
-	recent := map[string]bool{}
-	for b := last; b > last-3 && b >= 0; b-- {
-		for _, o := range n.Blocks.Orders(b) {
-			recent[o.TrfrID] = true
-		}
-	}
-	stored := 0
-	for num := last + 1; ; num++ {
-		raw, ok := byNum[num]
-		if !ok {
-			break
-		}
-		blk, err := storage.DecodeBlock(raw)
-		if err != nil {
-			return stored, err
-		}
-		if err := n.ValidateBlock(blk, prev, prevHash, recent); err != nil {
-			return stored, err
-		}
-		if err := n.Blocks.Write(blk); err != nil {
-			return stored, err
-		}
-		for _, o := range blk.Orders {
-			recent[o.TrfrID] = true
-		}
-		prev, prevHash = blk.Header, crypto.IDHashBytes(raw)
-		stored++
-	}
-	if stored > 0 {
-		n.SetMyLastBlock(n.Blocks.LastUpdated())
-		n.UpdateMyData()
-	}
-	return stored, nil
+	n.chainMu.Lock()
+	defer n.chainMu.Unlock()
+	return n.acceptRunLocked(byNum)
 }

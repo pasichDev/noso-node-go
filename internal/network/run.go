@@ -83,11 +83,14 @@ func (e *Engine) Tick() {
 		e.logf("events", "Starting construction of block "+codec.IntToStr(n.MyLastBlock()+1))
 		_, err := n.BuildNewBlock(n.MyLastBlock()+1, build, n.MyLastBlockHash(), BuildMiner, BuildSolution)
 		if err != nil {
+			// FIX: the build time is kept after a failure (Pascal clears it
+			// only on success, mpblock.pas:391), so the build is retried.
 			e.logf("exceps", "build block: "+err.Error())
+		} else {
+			e.mu.Lock()
+			e.buildNMSBlock = 0
+			e.mu.Unlock()
 		}
-		e.mu.Lock()
-		e.buildNMSBlock = 0
-		e.mu.Unlock()
 	}
 	e.saveUpdatedFiles()
 	e.ReadClientsCheck()
@@ -236,11 +239,12 @@ func (e *Engine) mnLoop() {
 			if my := e.GetMyIP(); my != "" && my != o.MNIP && my != "Closing NODE" && my != "BANNED" && codec.IsValidIP(my) {
 				e.logf("console", "Auto IP: updated to "+my)
 				n.UpdateOptions(func(op *storageOptions) { op.MNIP = my })
+				_ = n.SaveOptions() // FIX: saveUpdatedFiles was a no-op
 			}
 		}
 		for n.WaitingMNsLen() > 0 {
 			line := n.PopWaitingMN()
-			if !n.IPMNAlreadyProcessed(line) {
+			if !n.IPMNAlreadyProcessed(line) && e.challengeReport(line) {
 				if info := n.CheckMNReport(line, n.MyLastBlock()); info != "" {
 					e.OutgoingAdd(node.PTCHeader(n) + info)
 				}
@@ -444,4 +448,30 @@ func (e *Engine) UpdateTimeOffset(servers string) int64 {
 	}
 	e.N.SetTimeOffset(m)
 	return m
+}
+
+// challengeReport proves that the reporter controls the IP it names: the node
+// at that address must answer an MNVER challenge (fresh nonce) with a
+// signature of the report's sign key. FIX(C-07): a report was believed on
+// the signature of the funds key alone, so anyone with stake could list any
+// IP. This is the verification that is on by default, whether or not any
+// registered validator exists. Our own report is not challenged.
+func (e *Engine) challengeReport(line string) bool {
+	p := strings.IndexByte(line, '$')
+	if p < 0 {
+		p = 0
+	}
+	m, ok := node.ParseMNode(line[p:])
+	if !ok {
+		return false
+	}
+	if m.IP == e.N.Options().MNIP {
+		return true
+	}
+	nonce := randomNonce()
+	var ans string
+	for try := 0; try < 2 && ans == ""; try++ {
+		ans = e.RequestLine(m.IP, int(m.Port), "MNVER "+nonce)
+	}
+	return node.CheckVerificationLine(ans, nonce, e.N.SyncTus(), m)
 }

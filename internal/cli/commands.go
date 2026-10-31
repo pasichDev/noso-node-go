@@ -370,8 +370,12 @@ func init() {
 		"NOSOCFG":     func(d *Dispatcher, l string) { d.log("%s", d.N.CFG.DataStr()) },
 
 		// maintenance
-		"UNDOBLOCK":         func(d *Dispatcher, l string) { d.N.UndoLastBlock() },
-		"REBUILDSUM":        func(d *Dispatcher, l string) { _ = d.N.RebuildSummary() },
+		"UNDOBLOCK": func(d *Dispatcher, l string) { d.N.UndoLastBlock() },
+		"REBUILDSUM": func(d *Dispatcher, l string) {
+			if err := d.N.RebuildSummary(); err != nil {
+				d.log("rebuild failed, previous state restored: %v", err)
+			}
+		},
 		"ZIPSUMARY":         func(d *Dispatcher, l string) { _ = d.N.ZipSummary() },
 		"RESTORESUMARY":     func(d *Dispatcher, l string) { restoreSummary(d) },
 		"RESTOREBLOCKCHAIN": cmdRestoreChain,

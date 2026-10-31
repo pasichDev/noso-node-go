@@ -1,6 +1,7 @@
 package node
 
 import (
+	"os"
 	"strings"
 	"sync"
 
@@ -24,6 +25,11 @@ type MNode struct {
 	// FIX(H-01): the fund owner's public key and signature over the report.
 	Pub string
 	Sig string
+	// FIX(H-01): a cold-funds masternode. SignPub is the public key of the
+	// sign address; Deleg is the funds key's one-time signature binding that
+	// sign address to the funds address. Sig is then made by the sign key.
+	SignPub string
+	Deleg   string
 }
 
 // MNCheck is TMNCheck, a masternode verification report.
@@ -135,6 +141,8 @@ func ParseMNode(s string) (MNode, bool) {
 		Hash:        codec.Truncate(p(9), 32),
 		Pub:         p(10),
 		Sig:         p(11),
+		SignPub:     p(12),
+		Deleg:       p(13),
 	}
 	switch {
 	case !codec.IsValidIP(m.IP):
@@ -145,7 +153,10 @@ func ParseMNode(s string) (MNode, bool) {
 	case m.First < 0, m.Last < 0, m.Total < 0, m.Validations < 0:
 	case m.Hash != crypto.IDHash(m.IP+codec.IntToStr(int64(m.Port))+m.Sign+m.Fund):
 	case crypto.GetAddressFromPublicKey(m.Pub, 0) != m.Fund:
-	case !crypto.VerifyCanonical(m.Pub, m.Sig, "MNREPORT1", mnReportFields(m)...):
+	case m.SignPub == "" && !crypto.VerifyCanonical(m.Pub, m.Sig, "MNREPORT1", mnReportFields(m)...):
+	case m.SignPub != "" && (crypto.GetAddressFromPublicKey(m.SignPub, 0) != m.Sign ||
+		!crypto.VerifyCanonical(m.Pub, m.Deleg, "MNDELEG1", m.Sign, m.Fund) ||
+		!crypto.VerifyCanonical(m.SignPub, m.Sig, "MNREPORT1", mnReportFields(m)...)):
 	default:
 		return m, true
 	}
@@ -162,7 +173,34 @@ func mnReportFields(m MNode) []string {
 func StringFromMN(m MNode) string {
 	i := func(v int32) string { return codec.IntToStr(int64(v)) }
 	return m.IP + " " + i(m.Port) + " " + m.Sign + " " + m.Fund + " " + i(m.First) + " " +
-		i(m.Last) + " " + i(m.Total) + " " + i(m.Validations) + " " + m.Hash + " " + m.Pub + " " + m.Sig
+		i(m.Last) + " " + i(m.Total) + " " + i(m.Validations) + " " + m.Hash + " " + m.Pub + " " + m.Sig +
+		deleg(m)
+}
+
+func deleg(m MNode) string {
+	if m.SignPub == "" {
+		return ""
+	}
+	return " " + m.SignPub + " " + m.Deleg
+}
+
+// SignDelegation is made once, offline, with the funds key: it lets the
+// sign key report the masternode so the funds key can stay cold.
+func SignDelegation(fundsPriv, sign, fund string) string {
+	return crypto.SignCanonical(fundsPriv, "MNDELEG1", sign, fund)
+}
+
+const delegationFile = "mndelegation.txt"
+
+// SetDelegation stores "fundsPub signature" for the configured sign and funds
+// addresses after checking it.
+func (n *Node) SetDelegation(fundsPub, sig string) error {
+	o := n.Options()
+	if crypto.GetAddressFromPublicKey(fundsPub, 0) != o.MNFunds ||
+		!crypto.VerifyCanonical(fundsPub, sig, "MNDELEG1", o.MNSign, o.MNFunds) {
+		return ErrBadSig
+	}
+	return os.WriteFile(n.seqFile(delegationFile), []byte(fundsPub+" "+sig), 0o600)
 }
 
 // CheckMNReport mirrors nosomasternodes.pas:401-444: a valid, legit report
@@ -200,10 +238,23 @@ func (n *Node) CheckMNReport(line string, block int64) string {
 func (n *Node) MNReportString(block int64) string {
 	o := n.Options()
 	w := n.Wallet.At(n.Wallet.IndexOf(o.MNFunds))
-	if o.MNFunds == "" || w.PrivateKey == "" {
+	if o.MNFunds == "" {
 		return ""
 	}
 	port, _ := codec.StrToInt(o.MNPort)
+	if w.PrivateKey == "" {
+		// Cold funds: the sign key reports under a stored delegation.
+		raw, err := os.ReadFile(n.seqFile(delegationFile))
+		sw := n.Wallet.At(n.Wallet.IndexOf(o.MNSign))
+		if err != nil || sw.PrivateKey == "" {
+			return ""
+		}
+		fp, sig := codec.Parameter(string(raw), 0), codec.Parameter(string(raw), 1)
+		m := MNode{IP: o.MNIP, Port: port, Sign: o.MNSign, Fund: o.MNFunds, First: int32(block), Last: int32(block),
+			Hash: crypto.IDHash(o.MNIP + o.MNPort + o.MNSign + o.MNFunds), Pub: fp, SignPub: sw.PublicKey, Deleg: sig}
+		m.Sig = crypto.SignCanonical(sw.PrivateKey, "MNREPORT1", mnReportFields(m)...)
+		return StringFromMN(m)
+	}
 	m := MNode{IP: o.MNIP, Port: port, Sign: o.MNSign, Fund: o.MNFunds, First: int32(block), Last: int32(block),
 		Hash: crypto.IDHash(o.MNIP + o.MNPort + o.MNSign + o.MNFunds), Pub: w.PublicKey}
 	m.Sig = crypto.SignCanonical(w.PrivateKey, "MNREPORT1", mnReportFields(m)...)
@@ -240,7 +291,11 @@ func (s *mnState) checksSnapshot(_ *Node) []MNCheck {
 func (n *Node) CreditMNVerifications() {
 	n.mn.mu.Lock()
 	defer n.mn.mu.Unlock()
-	for _, c := range n.mn.checks {
+	creditChecks(n.mn.list, n.mn.checks)
+}
+
+func creditChecks(list []MNode, checks []MNCheck) {
+	for _, c := range checks {
 		nodes := strings.ReplaceAll(c.ValidNodes, ":", " ")
 		seen := map[string]bool{}
 		for i := int64(0); ; i++ {
@@ -254,14 +309,50 @@ func (n *Node) CreditMNVerifications() {
 				continue
 			}
 			seen[ip] = true
-			for j := range n.mn.list {
-				if n.mn.list[j].IP == ip {
-					n.mn.list[j].Validations++
+			for j := range list {
+				if list[j].IP == ip {
+					list[j].Validations++
 					break
 				}
 			}
 		}
 	}
+}
+
+// paidMNs returns the funds addresses a block built now would pay, without
+// consuming any state: the validations are credited on a copy, so a block
+// build that fails and is retried sees the same list. Eligible addresses are
+// valid, distinct and hold the stake at this height (the rule followers
+// check, so an honest builder is never refused).
+func (n *Node) paidMNs(block int64) (text string, addrs []string) {
+	n.mn.mu.Lock()
+	list := append([]MNode(nil), n.mn.list...)
+	checks := append([]MNCheck(nil), n.mn.checks...)
+	n.mn.mu.Unlock()
+	creditChecks(list, checks)
+	minV := int32(len(checks)/2 - 1)
+	text = codec.IntToStr(block)
+	seen := map[string]bool{}
+	for _, m := range list {
+		if m.Validations < minV {
+			continue
+		}
+		a := codec.Truncate(m.Fund, 32)
+		if seen[a] || !MNEligible(n, a, block) {
+			continue
+		}
+		seen[a] = true
+		addrs = append(addrs, a)
+		text += " " + m.IP + ";" + codec.IntToStr(int64(m.Port)) + ":" + m.Fund + n.MNFile.AgeCount(m.IP, int(m.Port), m.Fund)
+	}
+	return text, addrs
+}
+
+// MNEligible is the consensus rule for a paid masternode address: a regular
+// address holding at least the required stake in the summary as of the
+// previous block.
+func MNEligible(n *Node, addr string, block int64) bool {
+	return len(addr) <= 32 && crypto.IsValidHashAddress(addr) && n.Summary.BalanceIndexed(addr) >= consensus.GetStackRequired(block)
 }
 
 // ChecksCount mirrors GetMNsChecksCount.
