@@ -40,13 +40,26 @@ type Options struct {
 	RPCBanned    string
 	MaxPeers     int
 	PosWarning   int64
+
+	// Security settings added by this port. None has a default key: an empty
+	// key means "nobody is trusted for that purpose".
+	AdminKey      string // public key (Base64) allowed to sign directives and GVT transfers
+	ConfigKey     string // public key allowed to sign the network configuration
+	ValidatorKeys string // "ip=Naddress,ip=Naddress": masternode verifiers and their sign addresses
+	SeedKeys      string // "ip=publickey,...": keys of seed nodes that sign status replies
+	ReleaseKey    string // public key that signs the default seed list
+	BuildBlocks   bool   // this node proposes blocks (see docs/compatibility.md, M-10)
+	RPCToken      string // read scope bearer token
+	RPCSpendToken string // spend scope bearer token
+	RPCBind       string // listen address of the RPC server, loopback by default
+	RPCExposeKeys bool   // include private keys in getnewaddressfull answers
 }
 
 // DefaultOptions returns the Pascal variable initialisers.
 func DefaultOptions(release string) Options {
 	return Options{
 		Language: "en", LastPoUpdate: release, CloseStart: true, AutoUpdate: true,
-		FullNode: true, MNPort: "8080", RPCPort: 8078, RPCPass: "default",
+		FullNode: true, MNPort: "8080", RPCPort: 8078, RPCPass: "", RPCBind: "127.0.0.1",
 		RPCFilter: true, RPCWhitelist: "127.0.0.1,localhost", MaxPeers: 50, PosWarning: 7,
 		FormState: [5]int64{0, 0, 400, 560, 2},
 	}
@@ -137,10 +150,22 @@ func (o *Options) Save(path string) error {
 	w("//Banned methods for RPC requests")
 	w("RPCBanned " + o.RPCBanned)
 	w("")
+	w("---Security (added by this port)---")
+	w("AdminKey " + o.AdminKey)
+	w("ConfigKey " + o.ConfigKey)
+	w("ValidatorKeys " + o.ValidatorKeys)
+	w("SeedKeys " + o.SeedKeys)
+	w("ReleaseKey " + o.ReleaseKey)
+	w("BuildBlocks " + boolStr(o.BuildBlocks))
+	w("RPCToken " + o.RPCToken)
+	w("RPCSpendToken " + o.RPCSpendToken)
+	w("RPCBind " + o.RPCBind)
+	w("RPCExposeKeys " + boolStr(o.RPCExposeKeys))
+	w("")
 	w("---Deprecated. To be removed.---")
 	w("MaxPeers " + codec.IntToStr(int64(o.MaxPeers)))
 	w("PosWarning " + codec.IntToStr(o.PosWarning))
-	return os.WriteFile(path, []byte(sb.String()), 0o644)
+	return os.WriteFile(path, []byte(sb.String()), 0o600) // FIX(H-10): holds tokens
 }
 
 // Load mirrors LoadADV: lines are matched on their first blank-separated
@@ -219,6 +244,26 @@ func (o *Options) Load(path string) error {
 			o.MNFunds = p(1)
 		case "MNSign":
 			o.MNSign = p(1)
+		case "AdminKey":
+			o.AdminKey = p(1)
+		case "ConfigKey":
+			o.ConfigKey = p(1)
+		case "ValidatorKeys":
+			o.ValidatorKeys = p(1)
+		case "SeedKeys":
+			o.SeedKeys = p(1)
+		case "ReleaseKey":
+			o.ReleaseKey = p(1)
+		case "BuildBlocks":
+			ok = bl(&o.BuildBlocks)
+		case "RPCToken":
+			o.RPCToken = p(1)
+		case "RPCSpendToken":
+			o.RPCSpendToken = p(1)
+		case "RPCBind":
+			o.RPCBind = p(1)
+		case "RPCExposeKeys":
+			ok = bl(&o.RPCExposeKeys)
 		case "MNAutoIp":
 			ok = bl(&o.MNAutoIP)
 		case "WO_FullNode":

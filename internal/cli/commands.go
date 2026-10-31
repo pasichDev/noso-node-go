@@ -35,13 +35,13 @@ func init() {
 			}
 		},
 		"SHA256":     func(d *Dispatcher, l string) { d.log("%s", crypto.SHA256String(p(l, 1))) },
-		"MD5":        func(d *Dispatcher, l string) { d.log("%s", crypto.MD5String(p(l, 1))) },
+		"MD5":        func(d *Dispatcher, l string) { d.log("%s", crypto.MD5Hex(p(l, 1))) },
 		"MD160":      func(d *Dispatcher, l string) { d.log("%s", crypto.RIPEMD160String(p(l, 1))) },
 		"BASE58SUM":  func(d *Dispatcher, l string) { d.log("%s", crypto.BMB58resumen(p(l, 1))) },
 		"ADDFROMPUB": func(d *Dispatcher, l string) { d.log("%s", crypto.GetAddressFromPublicKey(p(l, 1), 0)) },
 		"MYHASH": func(d *Dispatcher, l string) {
 			exe, _ := os.Executable()
-			d.log("%s", crypto.MD5File(exe))
+			d.log("%s", crypto.IDHashFile(exe))
 		},
 		"STATUS": cmdStatus,
 		"SYSTEM": cmdSystem,
@@ -189,11 +189,17 @@ func init() {
 				d.log("Invalid address")
 				return
 			}
+			// FIX(L-05): getcert <address> <audience> <nonce>
 			w := d.N.Wallet.At(i)
-			d.log("%s owner cert: \n%s", addr, crypto.GetCertificate(w.PublicKey, w.PrivateKey, d.N.UTCTimeStr()))
+			cert := crypto.GetCertificate(w.PublicKey, w.PrivateKey, p(l, 2), p(l, 3), d.N.UTCTimeStr())
+			if p(l, 2) == "" || p(l, 3) == "" || cert == "" {
+				d.log("Syntax: getcert {address} {audience} {nonce}")
+				return
+			}
+			d.log("%s owner cert: \n%s", addr, cert)
 		},
 		"CHECKCERT": func(d *Dispatcher, l string) {
-			addr, ts := crypto.CheckCertificate(p(l, 1))
+			addr, ts := crypto.CheckCertificate(p(l, 1), p(l, 2), p(l, 3))
 			if addr == "" {
 				d.log("Invalid verification")
 				return
@@ -372,6 +378,7 @@ func init() {
 		"RESTORECFG": func(d *Dispatcher, l string) { d.N.CFG.Restore() },
 		"CLEARCFG":   func(d *Dispatcher, l string) { d.N.CFG.Clear(p(l, 1)) },
 		"DIRECTIVE":  cmdDirective,
+		"SIGNCFG":    cmdSignCfg,
 
 		// RPC
 		"SETRPCPORT": func(d *Dispatcher, l string) {
@@ -441,19 +448,21 @@ func init() {
 		},
 
 		// repository seeds
-		"GETREPOSEEDS": func(d *Dispatcher, l string) { d.log("%s", fetchSeeds()) },
+		"GETREPOSEEDS": func(d *Dispatcher, l string) {
+			d.log("%s", FetchSeeds(p(l, 1), d.N.Options().ReleaseKey))
+		},
 		"FORCEREPOSEEDS": func(d *Dispatcher, l string) {
-			cfgErr(d, d.N.CFG.SetData(fetchSeeds(), 1))
+			if list := FetchSeeds(p(l, 1), d.N.Options().ReleaseKey); list != "" {
+				cfgErr(d, d.N.CFG.SetData(list, 1))
+			} else {
+				d.log("No verified seed list (needs https url and a configured ReleaseKey).")
+			}
 		},
 
-		// intentionally not supported (see docs/port-status.md)
-		"UPDATE":       skipped("self-update downloads and replaces the executable"),
-		"GETBETA":      skipped("self-update downloads and replaces the executable"),
-		"CHECKUPDATES": skipped("release check against the original repository"),
-		"SENDREPORT":   skipped("sends logs to the original developers' server"),
-		"TESTNET":      skipped("stress test that sends many transfers"),
-		"POST":         cmdPost,
-		"TT":           cmdTT,
+		// FIX(C-08): update, getbeta, checkupdates, sendreport and testnet do not
+		// exist: no code is ever downloaded or run, no report is uploaded.
+		"POST": cmdPost,
+		"TT":   cmdTT,
 	}
 }
 

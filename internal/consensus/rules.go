@@ -28,20 +28,44 @@ const (
 	SumMarkInterval      = 100
 	Update050Block       = 120000
 	ProjectFunds         = "NpryectdevepmentfundsGE"
-	AdminHash            = "N3DthVsfEUtqrgWFHTEB6F88xLkT3Df"
-	AdminPubKey          = "BACo0LC7mWDn53orLANA2zKVSC1HfSe/jc/Ih7+cBQ1oh53Bu2Zo655WFmWnoKHEeaNflb1CR9WcfXuhmkKaY8Y="
+	// AdminHash is only the miner address written into the genesis block
+	// (history data, not a trust anchor).
+	AdminHash = "N3DthVsfEUtqrgWFHTEB6F88xLkT3Df"
 )
 
-// GetSupply mirrors nosogeneral.pas:213-223. Blocks of 420000 and above
-// return 0 (COMPAT: no supply is defined after the second halving period).
+// GetSupply returns the circulating supply after block `block`: the premine
+// plus every reward paid for blocks 1..block under the real halving schedule.
+// FIX(L-06): the original (nosogeneral.pas:213-223) ignored halvings after
+// block 210000 and returned 0 from block 420000.
 func GetSupply(block int64) int64 {
-	switch {
-	case block < 210000:
-		return block*5000000000 + 1030390730000
-	case block >= 210000 && block < 420000:
-		return 209999*5000000000 + 1030390730000 + (block-209999)*5000000000
+	if block < 0 {
+		return 0
 	}
-	return 0
+	total := int64(PremineAmount)
+	for from := int64(1); from <= block; {
+		period := from / BlockHalvingInterval
+		end := (period+1)*BlockHalvingInterval - 1
+		if end > block {
+			end = block
+		}
+		total += (end - from + 1) * GetBlockReward(from)
+		from = end + 1
+	}
+	return total
+}
+
+// MaxSupply bounds any single amount (premine plus every reward ever paid).
+// FIX(C-05).
+var MaxSupply = GetSupply(BlockHalvingInterval * (HalvingSteps + 1))
+
+// CheckedAdd adds two non-negative amounts and reports overflow or an amount
+// beyond MaxSupply. FIX(C-05): the original added Int64 values without
+// checks (mpprotocol.pas:782, nosounit.pas:407).
+func CheckedAdd(a, b int64) (int64, bool) {
+	if a < 0 || b < 0 || a > MaxSupply || b > MaxSupply {
+		return 0, false
+	}
+	return a + b, true
 }
 
 // GetBlockReward mirrors mpblock.pas:489-500: the premine for block 0,

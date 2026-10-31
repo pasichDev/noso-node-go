@@ -7,6 +7,9 @@
 package node
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"os"
 	"sync"
 	"time"
@@ -78,9 +81,28 @@ type Node struct {
 	StartTime                    int64
 }
 
-// New opens (and creates when missing) the data directory like
+// New opens with a clear-text wallet (tests); use NewWithConfig otherwise. It opens (and creates when missing) the data directory like
 // VerifyFiles/FileStructure (mpdisk.pas:66-163).
 func New(root string, fetchSeeds func() string) (*Node, error) {
+	return NewWithConfig(root, Config{FetchSeeds: fetchSeeds, InsecurePlainWallet: true})
+}
+
+// Config selects how a node opens its data.
+type Config struct {
+	// FetchSeeds downloads the default seed list on first start (nil: none).
+	FetchSeeds func() string
+	// WalletPassphrase encrypts the wallet (FIX(H-10)): wallet.enc is used,
+	// and a legacy wallet.pkw is migrated into it and destroyed.
+	WalletPassphrase []byte
+	// InsecurePlainWallet keeps the original clear-text wallet.pkw. It exists
+	// for tests and must be asked for explicitly.
+	InsecurePlainWallet bool
+}
+
+// NewWithConfig opens (and creates when missing) the data directory like
+// VerifyFiles/FileStructure (mpdisk.pas:66-163).
+func NewWithConfig(root string, cfg Config) (*Node, error) {
+	fetchSeeds := cfg.FetchSeeds
 	n := &Node{Lay: storage.NewLayout(root), clock: func() int64 { return time.Now().Unix() }}
 	n.Opts = storage.DefaultOptions(MainnetVersion + NodeRelease)
 	if n.Lay.EnsureDirs() > 0 {
@@ -94,10 +116,17 @@ func New(root string, fetchSeeds func() string) (*Node, error) {
 	n.MNFile = storage.OpenMNFile(n.Lay.Masternodes)
 	n.GVTs = storage.OpenGVTs(n.Lay.GVTs)
 	n.CFG = storage.OpenCFG(n.Lay.CFG, n.UTCTime, fetchSeeds)
-	var existed bool
-	n.Wallet, existed = storage.OpenWallet(n.Lay.Wallet)
-	if !existed {
-		n.Opts.MNSign = ""
+	switch {
+	case len(cfg.WalletPassphrase) > 0:
+		w, err := storage.OpenWalletEncrypted(n.Lay.Wallet, cfg.WalletPassphrase)
+		if err != nil {
+			return nil, err
+		}
+		n.Wallet = w
+	case cfg.InsecurePlainWallet:
+		n.Wallet, _ = storage.OpenWallet(n.Lay.Wallet)
+	default:
+		return nil, ErrNoPassphrase
 	}
 	n.Blocks = storage.NewBlocks(n.Lay)
 	n.Summary = storage.OpenSummary(n.Lay.Summary)
@@ -237,7 +266,7 @@ func (n *Node) UpdateMyData() {
 	n.mu.Lock()
 	last := n.myLastBlock
 	n.mu.Unlock()
-	hash := crypto.MD5File(n.Lay.BlockFile(last))
+	hash := crypto.IDHashFile(n.Lay.BlockFile(last))
 	hdr := n.Blocks.Header(last)
 	n.mu.Lock()
 	n.myLastHash = hash
@@ -292,3 +321,33 @@ func (n *Node) TimeAgo(stamp int64) string {
 // StorageOptions re-exports storage.Options for callers that only import
 // the node package.
 type StorageOptions = storage.Options
+
+// ErrNoPassphrase is returned when no wallet passphrase was given and the
+// clear-text wallet was not explicitly allowed.
+var ErrNoPassphrase = errors.New("a wallet passphrase is required (or explicitly allow the insecure plain wallet)")
+
+// EnsureRPCTokens creates random RPC tokens on first use and stores them in
+// advopt.txt (mode 0600). FIX(H-09): the original shipped the password
+// "default" and never checked it.
+func (n *Node) EnsureRPCTokens() {
+	changed := false
+	n.UpdateOptions(func(o *storage.Options) {
+		if o.RPCToken == "" {
+			o.RPCToken, changed = randomToken(), true
+		}
+		if o.RPCSpendToken == "" {
+			o.RPCSpendToken, changed = randomToken(), true
+		}
+	})
+	if changed {
+		_ = n.SaveOptions()
+	}
+}
+
+func randomToken() string {
+	b := make([]byte, 24)
+	if _, err := rand.Read(b); err != nil {
+		panic(err)
+	}
+	return hex.EncodeToString(b)
+}

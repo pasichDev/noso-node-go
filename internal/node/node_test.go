@@ -118,9 +118,9 @@ func TestBuildTransferBlockAndReplay(t *testing.T) {
 		b.Summary.BalanceIndexed(dest) != a.Summary.BalanceIndexed(dest) {
 		t.Fatal("replayed balances differ")
 	}
-	// COMPAT: the replay path creates the AdminHash account touched every block.
-	if b.Summary.AddressLastOP(consensus.AdminHash) != 2 {
-		t.Fatal("admin account LastOP after replay")
+	// FIX(M-11): the replay touches the same account as the build path.
+	if b.Summary.AddressLastOP(storageGenesis) != 2 || b.Summary.Len() != a.Summary.Len()-1 {
+		t.Fatalf("replay genesis LastOP=%d len b=%d a=%d", b.Summary.AddressLastOP(storageGenesis), b.Summary.Len(), a.Summary.Len())
 	}
 	if a.Summary.AddressLastOP(storageGenesis) != 2 {
 		t.Fatal("genesis account LastOP after build")
@@ -160,34 +160,98 @@ func TestOrderPoolOrdering(t *testing.T) {
 	}
 }
 
-func TestMNReportRoundTrip(t *testing.T) {
+func TestMNReportSecurity(t *testing.T) {
 	now := int64(consensus.GenesysTimeStamp) + 600
 	n := newTestNode(t, &now)
-	sign := crypto.GetAddressFromPublicKey(crypto.GenerateKeyPair().PublicKey, 0)
-	fund := crypto.GetAddressFromPublicKey(crypto.GenerateKeyPair().PublicKey, 0)
-	n.UpdateOptions(func(o *storageOptions) { o.MNIP = "8.8.8.8"; o.MNPort = "8080"; o.MNSign = sign; o.MNFunds = fund })
+	fund := n.Wallet.At(0).Hash
+	signW := newWalletAddr(n)
+	setOpts := func() {
+		n.UpdateOptions(func(o *storageOptions) {
+			o.MNIP = "8.8.8.8"
+			o.MNPort = "8080"
+			o.MNSign = signW.Hash
+			o.MNFunds = fund
+		})
+	}
+	setOpts()
+	// H-01: a report from an address without the funds is refused even when
+	// the list is empty (the original skipped the check for the first report).
 	rep := n.MNReportString(10)
-	m, ok := ParseMNode("$MNREPO " + rep)
-	if !ok || m.IP != "8.8.8.8" || m.Fund != fund {
-		t.Fatalf("%v %+v", ok, m)
+	if rep == "" {
+		t.Fatal("no report produced")
 	}
-	if StringFromMN(m) != rep {
-		t.Fatalf("\n%s\n%s", StringFromMN(m), rep)
+	if n.CheckMNReport("PSK 2 v 1 $MNREPO "+rep, 10) != "" {
+		t.Fatal("H-01: first report accepted without funds")
 	}
-	// Empty list accepts without funds check (COMPAT nosomasternodes.pas:379).
+	n.Summary.ResetBlockRecords()
+	n.Summary.CreditTo(fund, consensus.GetStackRequired(11), 1)
+	_ = n.Summary.UpdateChanges()
 	if n.CheckMNReport("PSK 2 v 1 $MNREPO "+rep, 10) == "" || n.MNsListLen() != 1 {
-		t.Fatal("report not accepted")
+		t.Fatal("funded, signed report refused")
 	}
-	// Second report from the same IP is refused.
 	if n.CheckMNReport("PSK 2 v 1 $MNREPO "+rep, 10) != "" {
 		t.Fatal("duplicate accepted")
 	}
-	// Zero checks => MinValidations = -1 => everyone listed, age ":1".
+	n.ClearMNsList()
+	// Forged: the same data signed by another key.
+	m, _ := ParseMNode("$MNREPO " + rep)
+	forged := m
+	other := newWalletAddr(n)
+	forged.Pub = other.PublicKey
+	forged.Sig = crypto.SignCanonical(other.PrivateKey, "MNREPORT1", mnReportFields(forged)...)
+	if n.CheckMNReport("PSK 2 v 1 $MNREPO "+StringFromMN(forged), 10) != "" {
+		t.Fatal("H-01: report signed by a key that is not the fund owner accepted")
+	}
+	// Validations must start at zero.
+	pre := m
+	pre.Validations = 50
+	pre.Sig = crypto.SignCanonical(n.Wallet.At(0).PrivateKey, "MNREPORT1", mnReportFields(pre)...)
+	if n.CheckMNReport("PSK 2 v 1 $MNREPO "+StringFromMN(pre), 10) != "" {
+		t.Fatal("H-01: pre-loaded validations accepted")
+	}
+	// A stale report (other block) is refused.
+	if n.CheckMNReport("PSK 2 v 1 $MNREPO "+rep, 11) != "" {
+		t.Fatal("H-01: report not bound to the block")
+	}
+	// Zero checks => every node is listed.
+	n.CheckMNReport("PSK 2 v 1 $MNREPO "+rep, 10)
 	if got := n.MNsAddresses(10); got != "10 8.8.8.8;8080:"+fund+":1" {
 		t.Fatal(got)
 	}
-	n.ClearMNsList()
-	if n.MNsAddresses(10) != "10" {
-		t.Fatal("empty list gives only the block number")
+}
+
+func newWalletAddr(n *Node) types.Wallet {
+	kp := crypto.GenerateKeyPair()
+	w := types.Wallet{Hash: crypto.GetAddressFromPublicKey(kp.PublicKey, 0), PublicKey: kp.PublicKey, PrivateKey: kp.PrivateKey}
+	n.Wallet.Insert(w)
+	return w
+}
+
+// C-07: only registered validators with the registered key can add checks,
+// and duplicated IPs inside one check count once.
+func TestMNChecksSecurity(t *testing.T) {
+	now := int64(consensus.GenesysTimeStamp) + 600
+	n := newTestNode(t, &now)
+	v := newWalletAddr(n)
+	evil := newWalletAddr(n)
+	n.UpdateOptions(func(o *storageOptions) { o.ValidatorKeys = "9.9.9.9=" + v.Hash })
+	mk := func(w types.Wallet, ip, nodes string) string {
+		c := MNCheck{ValidatorIP: ip, Block: int32(n.MyLastBlock()), SignAddress: w.Hash, PubKey: w.PublicKey, ValidNodes: nodes}
+		c.Signature = crypto.SignCanonical(w.PrivateKey, "MNCHECK1", MNCheckFields(c)...)
+		return "PSK 2 v 1 $MNCHECK " + StringFromMNCheck(c)
+	}
+	if n.ValidateMNCheck(mk(evil, "9.9.9.9", "8.8.8.8;8080:")) != "" {
+		t.Fatal("C-07: check signed by an unregistered key accepted")
+	}
+	if n.ValidateMNCheck(mk(evil, "7.7.7.7", "8.8.8.8;8080:")) != "" {
+		t.Fatal("C-07: unregistered validator IP accepted")
+	}
+	if n.ValidateMNCheck(mk(v, "9.9.9.9", "8.8.8.8;8080:8.8.8.8;8080:8.8.8.8;8080:")) == "" {
+		t.Fatal("registered validator refused")
+	}
+	n.mn.list = []MNode{{IP: "8.8.8.8", Port: 8080}}
+	n.CreditMNVerifications()
+	if n.mn.list[0].Validations != 1 {
+		t.Fatalf("C-07: repeated IP counted %d times", n.mn.list[0].Validations)
 	}
 }

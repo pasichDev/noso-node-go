@@ -1,6 +1,7 @@
 package crypto
 
 import (
+	"encoding/asn1"
 	"math/big"
 	"strings"
 	"testing"
@@ -33,11 +34,8 @@ func TestHashes(t *testing.T) {
 	if SHA256String("abc") != "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD" {
 		t.Error("sha256")
 	}
-	if MD5String("abc") != "900150983CD24FB0D6963F7D28E17F72" {
+	if MD5Hex("abc") != "900150983CD24FB0D6963F7D28E17F72" {
 		t.Error("md5")
-	}
-	if MD5String("") != MD5OfEmpty {
-		t.Error("md5 empty")
 	}
 }
 
@@ -108,47 +106,73 @@ func TestOrderAndTransferHashShape(t *testing.T) {
 	}
 }
 
-func TestSignVerifyRoundTrip(t *testing.T) {
+func TestCanonicalSignVerify(t *testing.T) {
 	kp := GenerateKeyPair()
-	addr := GetAddressFromPublicKey(kp.PublicKey, 0)
-	if !IsValidHashAddress(addr) {
-		t.Fatal("generated address invalid", addr)
+	sig := SignCanonical(kp.PrivateKey, "ORDER1", "TRFR", "100", "NA", "NB")
+	if sig == "" || !VerifyCanonical(kp.PublicKey, sig, "ORDER1", "TRFR", "100", "NA", "NB") {
+		t.Fatal("round trip")
 	}
-	msg := "Customize this " + addr + " myalias"
-	sig := GetStringSigned(msg, kp.PrivateKey)
-	if sig == "" || !VerifySignedString(msg, sig, kp.PublicKey) {
-		t.Fatal("round trip failed")
+	// FIX(H-07): fields are length-prefixed, so moving a character from one
+	// field to the next changes the message.
+	if VerifyCanonical(kp.PublicKey, sig, "ORDER1", "TRFR", "10", "0NA", "NB") {
+		t.Fatal("field boundary ambiguity")
 	}
-	// The message is Base64-decoded leniently, so differences in
-	// non-alphabet characters do not change the signed bytes.
-	if !VerifySignedString("Customize  this"+addr+"myalias", sig, kp.PublicKey) {
-		t.Fatal("lenient decode must ignore blanks")
+	// FIX(H-07): domain separation.
+	if VerifyCanonical(kp.PublicKey, sig, "CERT1", "TRFR", "100", "NA", "NB") {
+		t.Fatal("domain confusion")
 	}
-	if VerifySignedString(msg+"X", sig, kp.PublicKey) {
-		t.Fatal("tampered message accepted")
+	// FIX(H-08): text that differs only in characters the lenient Base64
+	// decoder used to drop is now a different message.
+	s2 := SignCanonical(kp.PrivateKey, "D", "update 0.4.4")
+	if VerifyCanonical(kp.PublicKey, s2, "D", "update 0.44") {
+		t.Fatal("lenient decoding is back")
 	}
-	other := GenerateKeyPair()
-	if VerifySignedString(msg, sig, other.PublicKey) {
-		t.Fatal("wrong key accepted")
+	if VerifyCanonical(GenerateKeyPair().PublicKey, sig, "ORDER1", "TRFR", "100", "NA", "NB") {
+		t.Fatal("wrong key")
 	}
 }
 
-func TestCertificateRoundTrip(t *testing.T) {
+// FIX(M-13): a high-S twin of a valid signature is refused.
+func TestLowSEnforced(t *testing.T) {
 	kp := GenerateKeyPair()
-	c := GetCertificate(kp.PublicKey, kp.PrivateKey, "1700000000")
-	if c == "" {
-		t.Fatal("empty certificate")
+	for i := 0; i < 20; i++ {
+		sig := SignCanonical(kp.PrivateKey, "D", "x", string(rune('a'+i)))
+		der := DecodeBase64(sig)
+		var sg ecdsaSig
+		if _, err := asn1.Unmarshal(der, &sg); err != nil {
+			t.Fatal(err)
+		}
+		if sg.S.Cmp(secpHalfN) > 0 {
+			t.Fatal("signer produced high S")
+		}
+		twin := new(big.Int).Sub(secpN, sg.S)
+		d2, _ := asn1.Marshal(ecdsaSig{sg.R, twin})
+		if VerifyCanonical(kp.PublicKey, EncodeBase64(d2), "D", "x", string(rune('a'+i))) {
+			t.Fatal("high-S twin accepted")
+		}
 	}
-	addr, ts := CheckCertificate(c)
+}
+
+func TestCertificateAudienceAndNonce(t *testing.T) {
+	kp := GenerateKeyPair()
+	c := GetCertificate(kp.PublicKey, kp.PrivateKey, "exchange.example", "n0nce", "1700000000")
+	addr, ts := CheckCertificate(c, "exchange.example", "n0nce")
 	if addr != GetAddressFromPublicKey(kp.PublicKey, 0) || ts != "1700000000" {
 		t.Fatalf("%q %q", addr, ts)
 	}
+	// FIX(L-05): a certificate cannot be reused for another audience or nonce.
+	if a, _ := CheckCertificate(c, "evil.example", "n0nce"); a != "" {
+		t.Fatal("audience ignored")
+	}
+	if a, _ := CheckCertificate(c, "exchange.example", "other"); a != "" {
+		t.Fatal("nonce ignored")
+	}
 }
 
-func TestXor(t *testing.T) {
-	e := XorEncode("key", "hello")
-	if XorDecode("key", e) != "hello" {
-		t.Fatal(e)
+func TestIDHash(t *testing.T) {
+	// first 16 bytes of SHA-256("abc")
+	if IDHash("abc") != "BA7816BF8F01CFEA414140DE5DAE2223" {
+		t.Fatal(IDHash("abc"))
 	}
 }
 
@@ -194,9 +218,8 @@ func FuzzParsersNoPanic(f *testing.F) {
 		B10ToB58(s)
 		B10ToB16(s)
 		DecodeBase64(s)
-		XorDecode("k", s)
-		CheckCertificate(s)
-		VerifySignedString(s, s, s)
+		CheckCertificate(s, s, s)
+		VerifyCanonical(s, s, s, s)
 		GetMultiSource(s, 2)
 	})
 }

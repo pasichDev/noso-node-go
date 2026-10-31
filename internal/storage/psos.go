@@ -13,6 +13,9 @@ import (
 	"github.com/pasichDev/noso-node-go/internal/types"
 )
 
+// PSOHdrBytes is the size of the PSO file header.
+const PSOHdrBytes = 12
+
 // MNsLockExpireLapse is nosopsos.pas:67.
 const MNsLockExpireLapse = 2016
 
@@ -65,7 +68,7 @@ func (p *PSOs) Load() (errored bool) {
 	if !Exists(p.path) || errored {
 		p.saveLocked(int(p.header.Block))
 	} else {
-		p.hash = crypto.MD5File(p.path)
+		p.hash = crypto.IDHashFile(p.path)
 	}
 	return errored
 }
@@ -77,6 +80,12 @@ func (p *PSOs) parse(raw []byte) bool {
 		return false
 	}
 	p.header = PSOHeader{h[0], h[1], h[2]}
+	// FIX(M-09): the counts must fit the file before anything is allocated or
+	// looped over (nosopsos.pas:159-197 trusted them and ignored read results).
+	if h[1] < 0 || h[2] < 0 || int64(h[1])*types.MNLockSize > int64(len(raw)-PSOHdrBytes) ||
+		int64(h[2])*14 > int64(len(raw)-PSOHdrBytes)-int64(h[1])*types.MNLockSize {
+		return false
+	}
 	for i := int32(0); i < h[1]; i++ {
 		var b [types.MNLockSize]byte
 		if _, err := r.Read(b[:]); err != nil {
@@ -151,7 +160,7 @@ func (p *PSOs) saveLocked(block int) {
 		str(r.Params)
 	}
 	_ = writeFileAtomic(p.path, b.Bytes())
-	p.hash = crypto.MD5File(p.path)
+	p.hash = crypto.IDHashFile(p.path)
 }
 
 // FileHash returns PSOFileHash.
@@ -276,7 +285,7 @@ func (p *PSOs) AddNew(mode int, owner string, expire int, params string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.psos = append(p.psos, PSO{Mode: uint16(mode), Owner: owner, Expire: uint32(expire),
-		Hash:   crypto.MD5String(owner + params + codec.IntToStr(int64(mode))),
+		Hash:   crypto.IDHash(owner + params + codec.IntToStr(int64(mode))),
 		Params: params})
 }
 
@@ -290,3 +299,11 @@ func (p *PSOs) All() []PSO {
 var errShort = errors.New("short psos file")
 
 var _ = errShort
+
+// ValidPSOFile reports whether data is a complete, consistent PSO file. It
+// is used to vet a downloaded file before it replaces the local one.
+// FIX(H-06, M-09).
+func ValidPSOFile(data []byte) bool {
+	p := &PSOs{}
+	return len(data) >= PSOHdrBytes && p.parse(data)
+}

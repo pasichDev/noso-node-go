@@ -5,6 +5,7 @@ package network
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -111,28 +112,23 @@ func (c *Conn) ReadLine(timeout time.Duration) (string, error) {
 func (c *Conn) Buffered() bool { return c.r.Buffered() > 0 }
 
 // ReadStream reads the Int32 length and body that follow a file label line.
-func (c *Conn) ReadStream(timeout time.Duration) ([]byte, error) {
-	if timeout > 0 {
-		_ = c.c.SetReadDeadline(time.Now().Add(timeout))
-	}
+// FIX(H-11): the caller gives the maximum size for the kind of file, the
+// buffer grows with the data actually received (the original presized the
+// stream from the unauthenticated length, IdIOHandler.ReadStream), and one
+// deadline covers the whole transfer.
+func (c *Conn) ReadStream(total time.Duration, max int) ([]byte, error) {
+	_ = c.c.SetReadDeadline(time.Now().Add(total))
 	var hdr [4]byte
 	if _, err := io.ReadFull(c.r, hdr[:]); err != nil {
 		return nil, err
 	}
 	n := int32(binary.BigEndian.Uint32(hdr[:]))
-	if n < 0 || int64(n) > MaxStream {
+	if n < 0 || int64(n) > int64(max) || int64(n) > MaxStream {
 		return nil, ErrTooLong
 	}
-	buf := make([]byte, n)
-	for read := 0; read < int(n); {
-		if timeout > 0 {
-			_ = c.c.SetReadDeadline(time.Now().Add(timeout))
-		}
-		m, err := c.r.Read(buf[read:])
-		read += m
-		if err != nil && read < int(n) {
-			return nil, err
-		}
+	var buf bytes.Buffer
+	if _, err := io.CopyN(&buf, c.r, int64(n)); err != nil {
+		return nil, err
 	}
-	return buf, nil
+	return buf.Bytes(), nil
 }

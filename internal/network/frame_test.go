@@ -21,7 +21,7 @@ func TestFraming(t *testing.T) {
 	if l, _ := cb.ReadLine(time.Second); l != "RESUMENFILE" {
 		t.Fatal(l)
 	}
-	if d, err := cb.ReadStream(time.Second); err != nil || string(d) != "hello-bytes" {
+	if d, err := cb.ReadStream(time.Second, 1<<20); err != nil || string(d) != "hello-bytes" {
 		t.Fatalf("%q %v", d, err)
 	}
 	if l, _ := cb.ReadLine(time.Second); l != "bare-lf" {
@@ -61,4 +61,27 @@ func FuzzReadLine(f *testing.F) {
 			}
 		}
 	})
+}
+
+// FIX(H-11): a declared size above the per-kind maximum is refused before
+// any allocation, and a stalled sender hits the deadline.
+func TestStreamLimits(t *testing.T) {
+	a, b := net.Pipe()
+	cb := NewConn(b)
+	go func() { _, _ = a.Write([]byte{0x7f, 0xff, 0xff, 0xff}) }()
+	if _, err := cb.ReadStream(time.Second, 1<<20); err != ErrTooLong {
+		t.Fatalf("oversize accepted: %v", err)
+	}
+	a2, b2 := net.Pipe()
+	c2 := NewConn(b2)
+	go func() { _, _ = a2.Write([]byte{0, 0, 0, 10, 1, 2}) }() // promises 10 bytes, sends 2
+	start := time.Now()
+	if _, err := c2.ReadStream(300*time.Millisecond, 1<<20); err == nil || time.Since(start) > 2*time.Second {
+		t.Fatalf("stalled transfer not cut: %v", err)
+	}
+	a3, b3 := net.Pipe()
+	go func() { _, _ = a3.Write([]byte{0xff, 0xff, 0xff, 0xff}) }() // negative length
+	if _, err := NewConn(b3).ReadStream(time.Second, 1<<20); err != ErrTooLong {
+		t.Fatal("negative length accepted")
+	}
 }

@@ -47,6 +47,9 @@ func ParseOrder(line string) (Order, bool) {
 	}
 	o.TrxLine = v
 	o.Sender, o.Address, o.Receiver = p(7), p(8), p(9)
+	if tooLong(o) {
+		return o, false
+	}
 	if o.AmmountFee, ok = codec.StrToInt64(p(10)); !ok {
 		o.Normalize()
 		return o, false
@@ -56,6 +59,9 @@ func ParseOrder(line string) (Order, bool) {
 		return o, false
 	}
 	o.Signature, o.TrfrID = p(12), p(13)
+	if tooLong(o) {
+		return o, false
+	}
 	o.Normalize()
 	return o, true
 }
@@ -69,4 +75,12 @@ func StringFromHeader(h BlockHeader) string {
 		" Target:" + h.TargetHash + " Solution:" + h.Solution +
 		" NextDiff:" + i(int64(h.NxtBlkDiff)) + " Miner:" + h.AccountMiner +
 		" Fee:" + i(h.MinerFee) + " Reward:" + i(h.Reward)
+}
+
+// tooLong reports whether a parsed field exceeds its ShortString capacity.
+// FIX(L-08): the original silently truncated (nosogeneral.pas:26-41), so two
+// different addresses could collapse into one 40 character account.
+func tooLong(o Order) bool {
+	return len(o.OrderID) > 64 || len(o.OrderType) > 6 || len(o.Reference) > 64 || len(o.Sender) > 120 ||
+		len(o.Address) > 40 || len(o.Receiver) > 40 || len(o.Signature) > 120 || len(o.TrfrID) > 64
 }

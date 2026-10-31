@@ -71,7 +71,7 @@ func (m *MNFile) Text() string {
 }
 
 // Hash mirrors GetMNsHash: MD5 of the file as it is on disk.
-func (m *MNFile) Hash() string { return crypto.MD5File(m.path) }
+func (m *MNFile) Hash() string { return crypto.IDHashFile(m.path) }
 
 // Entries returns ArrayMNsData (sorted by descending age, stable).
 func (m *MNFile) Entries() []MNEntry {

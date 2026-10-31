@@ -44,10 +44,8 @@ type Engine struct {
 	lastBotClear int64
 
 	myPublicIP string
-	adminSeen  string
 
 	// rate limits (function level `const` variables of the Pascal code)
-	lastSendResumen, lastSendSumary, lastSendBlocks, lastSendUpdHeaders int64
 
 	// request throttles (nosonetwork.pas:155-167)
 	lastTimeRequestSumary, lastTimeRequestBlock, lastTimeRequestResumen int64
@@ -73,6 +71,16 @@ type Engine struct {
 
 	Log func(ch, msg string)
 
+	big sync.Mutex // guards the throttle and download flags shared by Tick and the slot goroutines (M-06)
+
+	expMu  sync.Mutex
+	expect map[expectKey]int64
+
+	limMu    sync.Mutex
+	fileLast map[string]int64   // kind+ip -> last served
+	heavy    map[string][]int64 // ip -> recent heavy requests
+	lineLog  map[int][]int64    // slot -> recent line times
+
 	stop chan struct{}
 	wg   sync.WaitGroup
 	cmds chan string
@@ -84,7 +92,8 @@ type Engine struct {
 // NewEngine builds an engine around a node and wires the node hooks.
 func NewEngine(n *node.Node) *Engine {
 	e := &Engine{N: n, MinPeers: 3, bots: map[string]int64{}, ipCtl: map[string]int{},
-		stop: make(chan struct{}), cmds: make(chan string, 256)}
+		stop: make(chan struct{}), cmds: make(chan string, 256),
+		expect: map[expectKey]int64{}, fileLast: map[string]int64{}, heavy: map[string][]int64{}, lineLog: map[int][]int64{}}
 	e.Dial = func(addr string, to time.Duration) (net.Conn, error) { return net.DialTimeout("tcp", addr, to) }
 	n.Consensus = e.GetConsensus
 	n.ServerOn = func() bool { e.mu.Lock(); defer e.mu.Unlock(); return e.serverOn }
@@ -181,7 +190,7 @@ func (e *Engine) PingString() string {
 		"null " +
 		codec.IntToStr(int64(n.ChecksCount())) + " " +
 		n.GVTs.Hash() + " " +
-		codec.Copy(crypto.MD5String(n.CFG.DataStr()), 0, 5) + " " +
+		codec.Copy(crypto.IDHash(n.CFG.DataStr()), 0, 5) + " " +
 		codec.Copy(n.PSOs.FileHash(), 0, 5)
 }
 
@@ -284,3 +293,94 @@ func indexOf(s, sub string) int {
 }
 
 var _ = consensus.SecondsPerBlock
+
+type expectKey struct {
+	slot int
+	kind string
+}
+
+// replyWindow is how long an answer to a request is accepted.
+const replyWindow = 60
+
+// expectReply records that we asked slot for `kind`. FIX(C-01, C-02, H-05,
+// H-06): transfers and configuration are accepted only as answers.
+func (e *Engine) expectReply(slot int, kind string) {
+	e.expMu.Lock()
+	e.expect[expectKey{slot, kind}] = e.N.UTCTime() + replyWindow
+	e.expMu.Unlock()
+}
+
+// takeReply consumes an outstanding expectation.
+func (e *Engine) takeReply(slot int, kind string) bool {
+	e.expMu.Lock()
+	defer e.expMu.Unlock()
+	k := expectKey{slot, kind}
+	exp, ok := e.expect[k]
+	delete(e.expect, k)
+	return ok && exp >= e.N.UTCTime()
+}
+
+// request sends a protocol request to a slot and expects the answer.
+func (e *Engine) request(slot int, code int, kind string) {
+	e.expectReply(slot, kind)
+	e.PTCSendLine(slot, e.ProtocolLine(code))
+}
+
+// filePermit limits how often one peer may fetch a file kind (10 s each).
+// FIX(L-04): the original kept one global timer per file kind, so one peer's
+// request starved every other peer (mpprotocol.pas:472-480, 509-517).
+func (e *Engine) filePermit(kind, ip string) bool {
+	now := e.N.UTCTime()
+	e.limMu.Lock()
+	defer e.limMu.Unlock()
+	k := kind + "|" + ip
+	if now < e.fileLast[k]+10 {
+		return false
+	}
+	e.fileLast[k] = now
+	if len(e.fileLast) > 4096 {
+		e.fileLast = map[string]int64{}
+	}
+	return true
+}
+
+// heavyOK allows a peer ten costly one-shot requests per minute (M-08).
+func (e *Engine) heavyOK(ip string) bool {
+	now := e.N.UTCTime()
+	e.limMu.Lock()
+	defer e.limMu.Unlock()
+	l := e.heavy[ip][:0]
+	for _, t := range e.heavy[ip] {
+		if t > now-60 {
+			l = append(l, t)
+		}
+	}
+	if len(l) >= 10 {
+		e.heavy[ip] = l
+		return false
+	}
+	e.heavy[ip] = append(l, now)
+	if len(e.heavy) > 4096 {
+		e.heavy = map[string][]int64{}
+	}
+	return true
+}
+
+// lineBudget allows 200 protocol lines per 10 seconds per connection (M-07).
+func (e *Engine) lineBudget(slot int) bool {
+	now := e.N.UTCTime()
+	e.limMu.Lock()
+	defer e.limMu.Unlock()
+	l := e.lineLog[slot][:0]
+	for _, t := range e.lineLog[slot] {
+		if t > now-10 {
+			l = append(l, t)
+		}
+	}
+	if len(l) >= 200 {
+		e.lineLog[slot] = l
+		return false
+	}
+	e.lineLog[slot] = append(l, now)
+	return true
+}

@@ -2,7 +2,6 @@ package crypto
 
 import (
 	"crypto/rand"
-	"math/big"
 	"strings"
 
 	"github.com/pasichDev/noso-node-go/internal/codec"
@@ -31,29 +30,6 @@ func GenerateKeyPair() KeyPair {
 			PrivateKey: EncodeBase64(d.Bytes()),
 		}
 	}
-}
-
-// GetStringSigned mirrors nosocrypto.pas:217-228. COMPAT: the message is
-// first run through the lenient Base64 decoder (line 223), so a plain text
-// message is signed as the bytes left after discarding every non-Base64
-// character. Errors yield "".
-func GetStringSigned(msg, privateKey string) string {
-	d := new(big.Int).SetBytes(DecodeBase64(privateKey))
-	sig, ok := ecdsaSignSHA1(DecodeBase64(msg), d)
-	if !ok {
-		return ""
-	}
-	return EncodeBase64(sig)
-}
-
-// VerifySignedString mirrors nosocrypto.pas:231-242, including the lenient
-// Base64 decoding of the message (line 237).
-func VerifySignedString(msg, sigB64, pubKey string) bool {
-	pt, ok := decodePoint(DecodeBase64(pubKey))
-	if !ok {
-		return false
-	}
-	return ecdsaVerifySHA1(DecodeBase64(msg), DecodeBase64(sigB64), pt)
 }
 
 // GetAddressFromPublicKey mirrors nosocrypto.pas:245-258. COMPAT: the hash
@@ -104,87 +80,6 @@ func GetTransferHash(text string) string {
 
 // GetOrderHash mirrors nosocrypto.pas:355-359.
 func GetOrderHash(text string) string { return "OR" + B16ToB36(SHA256String(text)) }
-
-// XorEncode mirrors StrUtils.XorEncode: lower-case hex of key-xored bytes.
-func XorEncode(key, src string) string {
-	const d = "0123456789abcdef"
-	out := make([]byte, 0, 2*len(src))
-	for i := 0; i < len(src); i++ {
-		c := src[i]
-		if len(key) > 0 {
-			c ^= key[i%len(key)]
-		}
-		out = append(out, d[c>>4], d[c&15])
-	}
-	return string(out)
-}
-
-// XorDecode mirrors StrUtils.XorDecode; an invalid hex pair decodes as ' '.
-func XorDecode(key, src string) string {
-	out := make([]byte, 0, len(src)/2)
-	for i := 0; i < len(src)/2; i++ {
-		c := byte(' ')
-		h, l := hexVal(src[2*i]), hexVal(src[2*i+1])
-		if h >= 0 && l >= 0 {
-			c = byte(h<<4 | l)
-		}
-		if len(key) > 0 {
-			c ^= key[i%len(key)]
-		}
-		out = append(out, c)
-	}
-	return string(out)
-}
-
-// GetCertificateChecksum mirrors nosocrypto.pas:656-661.
-func GetCertificateChecksum(cert string) string {
-	r := B10ToB58(BMB58resumenNew(cert))
-	for len(r) < 3 {
-		r = "1" + r
-	}
-	return r
-}
-
-// GetCertificate mirrors nosocrypto.pas:362-383.
-func GetCertificate(pub, priv, curTime string) string {
-	addr := GetAddressFromPublicKey(pub, 0)
-	sig := GetStringSigned("OWN"+addr+curTime, priv)
-	if sig == "" {
-		return ""
-	}
-	cert := "OWN:" + pub + ":" + curTime + ":" + sig
-	cert = strings.ToUpper(XorEncode(SHA256String("noso"), cert))
-	r := B16ToB58("1" + cert)
-	return r + GetCertificateChecksum(r)
-}
-
-// CheckCertificate mirrors nosocrypto.pas:386-416. It returns the address
-// and the certificate time, or "" on any failure.
-func CheckCertificate(cert string) (addr, stamp string) {
-	if len(cert) < 3 {
-		return "", ""
-	}
-	sum := cert[len(cert)-3:]
-	cert = cert[:len(cert)-3]
-	if sum != GetCertificateChecksum(cert) {
-		return "", ""
-	}
-	hexs := B58ToB16(cert)
-	if len(hexs) < 1 {
-		return "", ""
-	}
-	hexs = hexs[1:]
-	plain := XorDecode(SHA256String("noso"), hexs)
-	parts := strings.Split(plain, ":")
-	if len(parts) < 4 {
-		return "", ""
-	}
-	a := GetAddressFromPublicKey(parts[1], 0)
-	if VerifySignedString("OWN"+a+parts[2], parts[3], parts[1]) {
-		return a, parts[2]
-	}
-	return "", ""
-}
 
 // CheckHashDiff mirrors nosocrypto.pas:419-438 (per-nibble absolute
 // difference of two MD5 hex strings). Non-hex characters raise in Pascal;

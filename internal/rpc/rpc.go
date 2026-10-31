@@ -1,6 +1,7 @@
 package rpc
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,7 +49,11 @@ func (s *Server) Start(port int) error {
 	if s.srv != nil {
 		return errors.New("RPC server already ENABLED")
 	}
-	ln, err := net.Listen("tcp", net.JoinHostPort("", codec.IntToStr(int64(port))))
+	bind := s.N.Options().RPCBind
+	if bind == "" {
+		bind = "127.0.0.1" // FIX(H-09): loopback unless the operator asks otherwise
+	}
+	ln, err := net.Listen("tcp", net.JoinHostPort(bind, codec.IntToStr(int64(port))))
 	if err != nil {
 		return err
 	}
@@ -89,19 +94,52 @@ func (s *Server) Addr() string {
 // MaxBody bounds a request body (hardening).
 const MaxBody = 1 << 20
 
-// handle mirrors TForm1.RPCServerExecute (masterpaskalform.pas:2274-2305).
+// spendMethods change the wallet or send data to the network and need the
+// spend token. FIX(H-09): the original had one shared "password" that was
+// never checked at all.
+var spendMethods = map[string]bool{"sendfunds": true, "submitorder": true, "submitorderwr": true,
+	"setdefault": true, "getnewaddress": true, "getnewaddressfull": true, "restart": true}
+
+// authScope returns 0 for no access, 1 for read and 2 for spend scope. The
+// tokens are compared in constant time.
+func (s *Server) authScope(h http.Header) int {
+	o := s.N.Options()
+	got := strings.TrimPrefix(h.Get("Authorization"), "Bearer ")
+	if !strings.HasPrefix(h.Get("Authorization"), "Bearer ") || got == "" {
+		return 0
+	}
+	eq := func(a string) bool { return a != "" && subtle.ConstantTimeCompare([]byte(a), []byte(got)) == 1 }
+	switch {
+	case eq(o.RPCSpendToken):
+		return 2
+	case eq(o.RPCToken):
+		return 1
+	}
+	return 0
+}
+
+// handle mirrors TForm1.RPCServerExecute (masterpaskalform.pas:2274-2305)
+// behind bearer-token authentication, an Origin ban and a content-type check.
+// FIX(H-09): a web page could post to the loopback RPC port (no
+// authentication, any content type) and spend the wallet.
 func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	o := s.N.Options()
 	host, _, _ := net.SplitHostPort(r.RemoteAddr)
+	scope := s.authScope(r.Header)
 	switch {
 	case o.RPCFilter && !ValidRPCHost(o.RPCWhitelist, host):
 		io.WriteString(w, ErrorCode(498, -1))
+	case r.Header.Get("Origin") != "" || scope == 0:
+		io.WriteString(w, ErrorCode(498, -1))
 	case r.Method != http.MethodPost:
+		io.WriteString(w, ErrorCode(400, -1))
+	case !strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "application/json"):
 		io.WriteString(w, ErrorCode(400, -1))
 	default:
 		body, _ := io.ReadAll(io.LimitReader(r.Body, MaxBody))
-		io.WriteString(w, s.Parse(string(body)))
+		io.WriteString(w, s.parse(string(body), scope >= 2))
 	}
 }
 
@@ -201,7 +239,9 @@ func paramString(raw json.RawMessage) string {
 // Parse mirrors ParseRPCJSON (mprpc.pas:~395-450). COMPAT: a request that
 // is valid JSON but lacks "method", "params" or an integer "id" makes the
 // Pascal code raise inside its try/except, so the HTTP body stays empty.
-func (s *Server) Parse(body string) string {
+func (s *Server) Parse(body string) string { return s.parse(body, false) }
+
+func (s *Server) parse(body string, spend bool) string {
 	var req request
 	dec := json.NewDecoder(strings.NewReader(body))
 	if err := dec.Decode(&req); err != nil {
@@ -227,6 +267,9 @@ func (s *Server) Parse(body string) string {
 	// the original builds " "+p for each and trims, equal to join+trim
 	if strings.Contains(s.N.Options().RPCBanned, req.Method) {
 		req.Method = "banned"
+	}
+	if spendMethods[req.Method] && !spend {
+		return ErrorCode(498, int(math.Round(idf)))
 	}
 	res, ok := s.dispatch(req.Method, params)
 	if !ok {
@@ -288,7 +331,7 @@ func (s *Server) dispatch(method, p string) (string, bool) {
 	case "sendfunds":
 		return s.sendFunds(p), true
 	case "checkcertificate":
-		addr, ts := crypto.CheckCertificate(codec.Parameter(p, 0))
+		addr, ts := crypto.CheckCertificate(codec.Parameter(p, 0), codec.Parameter(p, 1), codec.Parameter(p, 2))
 		if addr != "" {
 			return "checkcertificate\x7fTrue\x7f" + addr + "\x7f" + ts, true
 		}
@@ -366,7 +409,7 @@ func (s *Server) blockHeaders(n int64) string {
 		return ""
 	}
 	h := s.N.Blocks.Header(n)
-	hash := crypto.MD5File(s.N.Lay.BlockFile(n))
+	hash := crypto.IDHashFile(s.N.Lay.BlockFile(n))
 	sol := strings.ReplaceAll(h.Solution, " ", "\x00")
 	lbh := strings.ReplaceAll(h.LastBlockHash, " ", "")
 	return fmt.Sprintf("%d\x7f%d\x7f%d\x7f%d\x7f%d\x7f%d\x7f%d\x7f%s\x7f%s\x7f%s\x7f%d\x7f%s\x7f%d\x7f%d\x7f%s",
@@ -502,7 +545,11 @@ func (s *Server) newAddressFull() string {
 	if s.N.Options().RPCSaveNew {
 		storage.SaveAddressFile(s.N.Lay.RPCBakDir+"/"+w.Hash+".pkw", w)
 	}
-	return "newaddressfull\x7f" + w.Hash + "\x7f" + w.PublicKey + "\x7f" + w.PrivateKey
+	priv := ""
+	if s.N.Options().RPCExposeKeys { // FIX(H-09, H-10): keys are not sent over RPC by default
+		priv = w.PrivateKey
+	}
+	return "newaddressfull\x7f" + w.Hash + "\x7f" + w.PublicKey + "\x7f" + priv
 }
 
 // setDefault mirrors SetDefaultAddress: move the address to wallet slot 0.

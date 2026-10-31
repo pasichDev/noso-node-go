@@ -3,12 +3,14 @@ package node
 import (
 	"archive/zip"
 	"bytes"
+	"errors"
 	"io"
 	"os"
-	"path/filepath"
-	"strings"
+	"regexp"
 
 	"github.com/pasichDev/noso-node-go/internal/codec"
+	"github.com/pasichDev/noso-node-go/internal/crypto"
+	"github.com/pasichDev/noso-node-go/internal/storage"
 )
 
 // ZipSummary mirrors ZipSumary (nosounit.pas:145-169): sumary.zip holds the
@@ -32,8 +34,8 @@ func (n *Node) ZipSummary() error {
 }
 
 // ZipBlocks mirrors CreateZipBlockfile (mpprotocol.pas:639-674): blocks
-// first..min(first+100,last) zipped under the entry names
-// "NOSODATA/BLOCKS/N.blk" (forward slashes), as the Pascal peers expect.
+// first..min(first+100,last) zipped under flat entry names "N.blk" (FIX(C-02):
+// the original used the path "NOSODATA/BLOCKS/N.blk").
 func (n *Node) ZipBlocks(first int64) ([]byte, error) {
 	last := first + 100
 	if last > n.MyLastBlock() {
@@ -46,7 +48,7 @@ func (n *Node) ZipBlocks(first int64) ([]byte, error) {
 		if err != nil {
 			continue
 		}
-		w, err := zw.Create("NOSODATA/BLOCKS/" + codec.IntToStr(i) + ".blk")
+		w, err := zw.Create(codec.IntToStr(i) + ".blk")
 		if err != nil {
 			return nil, err
 		}
@@ -58,37 +60,86 @@ func (n *Node) ZipBlocks(first int64) ([]byte, error) {
 	return b.Bytes(), nil
 }
 
-// UnzipBlocks stores every "*.blk" entry of a received block zip into the
-// blocks directory. Entry paths are reduced to their base name, which both
-// accepts the Pascal naming and prevents path traversal (hardening).
-func (n *Node) UnzipBlocks(data []byte) (int, error) {
+// Limits for a received block archive. FIX(C-02, H-11).
+const (
+	maxZipEntries   = 128
+	maxZipEntrySize = 8 << 20
+	maxZipTotal     = 64 << 20
+)
+
+var blockEntryName = regexp.MustCompile(`^[0-9]{1,10}\.blk$`)
+
+// StageBlocks decodes a received archive in memory and stores the blocks
+// that validate, in order, starting right after our last block. Nothing is
+// extracted to disk by the archive itself. FIX(C-02, C-03): the original
+// unzipped the peer's archive over the node directory with the paths chosen
+// by the peer (masterpaskalform.pas:2442-2469, nosogeneral.pas:565-584).
+// Only flat entries named <number>.blk are read; links, directories, parent
+// references and over-size entries are rejected. It returns the number of
+// blocks stored.
+func (n *Node) StageBlocks(data []byte) (int, error) {
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return 0, err
 	}
-	count := 0
+	if len(zr.File) > maxZipEntries {
+		return 0, errors.New("archive has too many entries")
+	}
+	byNum := map[int64][]byte{}
+	var total uint64
 	for _, f := range zr.File {
-		name := filepath.Base(strings.ReplaceAll(f.Name, "\\", "/"))
-		if !strings.HasSuffix(name, ".blk") || f.UncompressedSize64 > 64<<20 {
-			continue
+		if !blockEntryName.MatchString(f.Name) || f.Mode()&os.ModeSymlink != 0 || f.FileInfo().IsDir() {
+			return 0, errors.New("archive entry not allowed: " + f.Name)
 		}
-		stem := strings.TrimSuffix(name, ".blk")
-		if codec.StrToInt64Def(stem, -1) < 0 {
-			continue
+		total += f.UncompressedSize64
+		if f.UncompressedSize64 > maxZipEntrySize || total > maxZipTotal {
+			return 0, errors.New("archive too large")
 		}
 		rc, err := f.Open()
 		if err != nil {
-			return count, err
+			return 0, err
 		}
-		raw, err := io.ReadAll(io.LimitReader(rc, 64<<20))
+		raw, err := io.ReadAll(io.LimitReader(rc, maxZipEntrySize+1))
 		rc.Close()
-		if err != nil {
-			return count, err
+		if err != nil || len(raw) > maxZipEntrySize {
+			return 0, errors.New("bad archive entry")
 		}
-		if err := os.WriteFile(filepath.Join(n.Lay.BlockDir, name), raw, 0o644); err != nil {
-			return count, err
-		}
-		count++
+		byNum[codec.StrToInt64Def(f.Name[:len(f.Name)-4], -1)] = raw
 	}
-	return count, nil
+	last := n.MyLastBlock()
+	prev := n.LastBlockData()
+	prevHash := n.MyLastBlockHash()
+	recent := map[string]bool{}
+	for b := last; b > last-3 && b >= 0; b-- {
+		for _, o := range n.Blocks.Orders(b) {
+			recent[o.TrfrID] = true
+		}
+	}
+	stored := 0
+	for num := last + 1; ; num++ {
+		raw, ok := byNum[num]
+		if !ok {
+			break
+		}
+		blk, err := storage.DecodeBlock(raw)
+		if err != nil {
+			return stored, err
+		}
+		if err := n.ValidateBlock(blk, prev, prevHash, recent); err != nil {
+			return stored, err
+		}
+		if err := n.Blocks.Write(blk); err != nil {
+			return stored, err
+		}
+		for _, o := range blk.Orders {
+			recent[o.TrfrID] = true
+		}
+		prev, prevHash = blk.Header, crypto.IDHashBytes(raw)
+		stored++
+	}
+	if stored > 0 {
+		n.SetMyLastBlock(n.Blocks.LastUpdated())
+		n.UpdateMyData()
+	}
+	return stored, nil
 }

@@ -47,7 +47,7 @@ func (g *GVTs) Reload() {
 			g.arr = append(g.arr, types.DecodeGVT(raw[i*types.GVTSize:]))
 		}
 	}
-	g.hash = crypto.MD5File(g.path)
+	g.hash = crypto.IDHashFile(g.path)
 }
 
 // Save mirrors SaveGVTs.
@@ -59,7 +59,7 @@ func (g *GVTs) Save() {
 		out = append(out, r.Encode()...)
 	}
 	_ = writeFileAtomic(g.path, out)
-	g.hash = crypto.MD5File(g.path)
+	g.hash = crypto.IDHashFile(g.path)
 }
 
 // Hash returns MyGVTsHash.
@@ -80,7 +80,7 @@ func (g *GVTs) Bytes() ([]byte, error) {
 func (g *GVTs) Replace(data []byte) bool {
 	g.mu.Lock()
 	err := writeFileAtomic(g.path, data)
-	g.hash = crypto.MD5File(g.path)
+	g.hash = crypto.IDHashFile(g.path)
 	g.mu.Unlock()
 	return err == nil
 }

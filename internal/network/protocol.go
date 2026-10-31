@@ -1,14 +1,16 @@
 package network
 
 import (
+	"fmt"
 	"net"
 	"strings"
 	"time"
 
 	"github.com/pasichDev/noso-node-go/internal/codec"
-	"github.com/pasichDev/noso-node-go/internal/consensus"
 	"github.com/pasichDev/noso-node-go/internal/crypto"
 	"github.com/pasichDev/noso-node-go/internal/node"
+	"github.com/pasichDev/noso-node-go/internal/storage"
+	"github.com/pasichDev/noso-node-go/internal/types"
 )
 
 // ValidProtocolCommands is masterpaskalform.pas:560-563. COMPAT: it is
@@ -108,6 +110,7 @@ func closeWith(c *Conn, msg string) {
 // handleIncoming mirrors IdTCPServer1Connect (masterpaskalform.pas:2623-2833)
 // and then runs the Execute loop for accepted peers.
 func (e *Engine) handleIncoming(c *Conn) {
+	defer e.recoverPanic("incoming", c)
 	ip := c.RemoteIP()
 	n := e.N
 	if e.BotExists(ip) {
@@ -136,12 +139,19 @@ func (e *Engine) handleIncoming(c *Conn) {
 		_ = c.Close()
 		return
 	}
+	switch codec.Parameter(line, 0) {
+	case "NSLGVT", "GETZIPSUMARY", "NSLBLKORD", "NSLMNS", "NSLPENDFULL", "NODESTATUS":
+		if !e.heavyOK(ip) { // FIX(M-08): costly requests are limited per peer
+			closeWith(c, "")
+			return
+		}
+	}
 	miIP := codec.Parameter(line, 1)
 	peerVersion := codec.Parameter(line, 2)
 	peerUTC := codec.StrToInt64Def(codec.Parameter(line, 3), 0)
 	switch codec.Parameter(line, 0) {
 	case "NODESTATUS":
-		closeWith(c, "NODESTATUS "+e.NodeStatusString())
+		closeWith(c, e.SignedStatus())
 		return
 	case "NSLORDER":
 		closeWith(c, n.PTCOrder(line))
@@ -150,13 +160,13 @@ func (e *Engine) handleIncoming(c *Conn) {
 		closeWith(c, codec.IntToStr(int64(n.PTCCustom(codec.GetOpData(line)))))
 		return
 	case "NSLSENDGVT":
-		closeWith(c, codec.IntToStr(int64(n.PTCSendGVT(line))))
+		closeWith(c, codec.IntToStr(int64(n.PTCSendGVT(codec.GetOpData(line)))))
 		return
 	case "GETMIIP":
 		closeWith(c, ip)
 		return
 	case "MNVER":
-		closeWith(c, n.VerificationLine(ip))
+		closeWith(c, n.VerificationLine(codec.Parameter(line, 1)))
 		return
 	case "NSLBALANCE":
 		closeWith(c, codec.IntToStr(n.AddressAvailable(codec.Parameter(line, 1))))
@@ -212,9 +222,7 @@ func (e *Engine) handleIncoming(c *Conn) {
 			return
 		}
 		e.logf("events", "New Connection from: "+ip)
-		if codec.IsValidIP(miIP) {
-			e.myPublicIP = miIP
-		}
+		_ = miIP // FIX(M-04): what a peer says about our address is ignored (masterpaskalform.pas:2821)
 		e.runSlot(sl, c, false)
 	}
 }
@@ -230,6 +238,7 @@ func abs64(v int64) int64 {
 // client is true for slots we dialled (TThreadClientRead), false for
 // accepted ones (IdTCPServer1Execute).
 func (e *Engine) runSlot(sl int, c *Conn, client bool) {
+	defer e.recoverPanic("slot", c)
 	e.peers.mu.Lock()
 	s := e.peers.slots[sl]
 	e.peers.mu.Unlock()
@@ -291,76 +300,48 @@ func (e *Engine) runSlot(sl int, c *Conn, client bool) {
 	}
 }
 
+// Per-kind size limits for received files. FIX(H-11).
+const (
+	maxHeadersFile = 32 << 20
+	maxSummaryFile = 128 << 20
+	maxGVTFile     = 100 * 105
+	maxPSOFile     = 16 << 20
+	maxBlockZip    = 64 << 20
+	maxMNText      = 1 << 20
+	transferTime   = 120 * time.Second
+)
+
+// fileKinds maps the label line of a file transfer to the request kind it
+// answers.
+var fileKinds = map[string]string{"RESUMENFILE": "RESUMEN", "SUMARYFILE": "SUMARY", "GVTSFILE": "GVTS",
+	"PSOSFILE": "PSOS", "BLOCKZIP": "BLOCKS"}
+
 // handleLine processes one received line of a slot; false asks the caller
 // to close the slot.
 func (e *Engine) handleLine(sl int, c *Conn, line string, client bool) bool {
 	n := e.N
 	label := codec.Parameter(line, 0)
-	recv := func() ([]byte, bool) {
-		data, err := c.ReadStream(10 * time.Second)
-		return data, err == nil
-	}
-	switch {
-	case label == "RESUMENFILE":
-		data, ok := recv()
-		if !ok || len(data)%70 != 0 { // hardening: whole records only
+	if kind, isFile := fileKinds[label]; isFile && label == line {
+		// FIX(C-02, C-03, H-05, H-06, H-11): a file is accepted only as the
+		// answer to a request sent on this very connection; an unsolicited
+		// one ends the connection (the original stored every push,
+		// masterpaskalform.pas:953-1134, 2419-2469, 2584-2600).
+		if !e.takeReply(sl, kind) {
+			e.logf("events", "unsolicited "+label+" from "+e.peers.get(sl).IP)
+			e.UpdateBotData(e.peers.get(sl).IP)
 			return false
 		}
-		e.downloadHeaders = true
-		saved := n.Headers.Replace(data)
-		n.UpdateMyData()
-		e.lastTimeRequestResumen = 0
-		e.downloadHeaders = false
-		return saved || !client
-	case label == "SUMARYFILE" && client:
-		data, ok := recv()
-		if !ok || len(data)%106 != 0 {
-			return false
-		}
-		e.downloadSumary = true
-		err := n.Summary.Replace(data)
-		n.UpdateMyData()
-		e.lastTimeRequestSumary = 0
-		e.downloadSumary = false
-		return err == nil
-	case label == "PSOSFILE":
-		data, ok := recv()
-		if !ok {
-			return false
-		}
-		if n.PSOs.Replace(data) {
-			n.PSOs.Load()
-			n.UpdateMyData()
-		}
-		e.lastTimePSOsRequest = 0
-		return true
-	case label == "GVTSFILE" && client:
-		data, ok := recv()
-		if !ok || len(data)%105 != 0 {
-			return false
-		}
-		saved := n.GVTs.Replace(data)
-		if saved {
-			n.GVTs.Reload()
-		}
-		e.lastTimeGVTsRequest = 0
-		return saved
-	case line == "BLOCKZIP":
-		data, ok := recv()
-		if !ok {
-			return false
-		}
-		e.downloadBlocks = true
-		if cnt, err := n.UnzipBlocks(data); err == nil && cnt >= 0 {
-			n.SetMyLastBlock(n.Blocks.LastUpdated())
-			n.UpdateMyData()
-		}
-		e.lastTimeRequestBlock = 0
-		e.downloadBlocks = false
-		return true
+		return e.receiveFile(sl, c, kind)
 	}
 	if !client {
 		// IdTCPServer1Execute direct handlers (masterpaskalform.pas:2470-2582).
+		ip := e.peers.get(sl).IP
+		switch codec.Parameter(line, 4) {
+		case "$GETRESUMEN", "$GETSUMARY", "$GETPSOS", "$LASTBLOCK", "$GETGVTS":
+			if !e.filePermit(codec.Parameter(line, 4), ip) { // FIX(M-08, L-04): per-peer budget
+				return true
+			}
+		}
 		switch codec.Parameter(line, 4) {
 		case "$GETRESUMEN":
 			if raw, err := n.Headers.Bytes(); err == nil && len(raw) > 0 {
@@ -392,7 +373,104 @@ func (e *Engine) handleLine(sl int, c *Conn, line string, client bool) bool {
 			return false // unexpected line: the connection is closed
 		}
 	}
+	if !e.lineBudget(sl) { // FIX(M-07): per-peer line budget
+		return false
+	}
 	e.addIncoming(sl, line)
+	return true
+}
+
+// receiveFile reads and validates one requested file. Nothing is stored
+// unless it matches the full hash the peer advertised in its PING and the
+// 5-character consensus value.
+func (e *Engine) receiveFile(sl int, c *Conn, kind string) bool {
+	n := e.N
+	e.big.Lock()
+	defer e.big.Unlock()
+	peer := e.peers.get(sl)
+	consOK := func(idx int, data []byte) bool {
+		h := crypto.IDHashBytes(data)
+		return codec.Copy(h, 0, 5) == e.GetConsensus(idx)
+	}
+	read := func(max int) ([]byte, bool) {
+		d, err := c.ReadStream(transferTime, max)
+		return d, err == nil
+	}
+	switch kind {
+	case "RESUMEN":
+		data, ok := read(maxHeadersFile)
+		if !ok || len(data)%types.ResumenSize != 0 || crypto.IDHashBytes(data) != peer.ResumenHash || !consOK(CHeaders, data) {
+			return false
+		}
+		if !e.headersAgreeWithBlocks(data) { // FIX(H-05)
+			return false
+		}
+		e.downloadHeaders = true
+		n.Headers.Replace(data)
+		n.UpdateMyData()
+		e.lastTimeRequestResumen = 0
+		e.downloadHeaders = false
+	case "SUMARY":
+		data, ok := read(maxSummaryFile)
+		if !ok || len(data)%types.SummarySize != 0 || crypto.IDHashBytes(data) != peer.SumarioHash || !consOK(CSumHash, data) {
+			return false
+		}
+		e.downloadSumary = true
+		err := n.Summary.Replace(data)
+		n.UpdateMyData()
+		e.lastTimeRequestSumary = 0
+		e.downloadSumary = false
+		return err == nil
+	case "GVTS":
+		data, ok := read(maxGVTFile)
+		if !ok || len(data) != maxGVTFile || crypto.IDHashBytes(data) != peer.GVTsHash || !consOK(CGVTsHash, data) {
+			return false
+		}
+		if n.GVTs.Replace(data) {
+			n.GVTs.Reload()
+		}
+		e.lastTimeGVTsRequest = 0
+	case "PSOS":
+		data, ok := read(maxPSOFile)
+		if !ok || !storage.ValidPSOFile(data) || codec.Copy(crypto.IDHashBytes(data), 0, 5) != peer.PSOHash ||
+			!consOK(20, data) {
+			return false
+		}
+		if n.PSOs.Replace(data) {
+			n.PSOs.Load()
+			n.UpdateMyData()
+		}
+		e.lastTimePSOsRequest = 0
+	case "BLOCKS":
+		data, ok := read(maxBlockZip)
+		if !ok {
+			return false
+		}
+		e.downloadBlocks = true
+		if _, err := n.StageBlocks(data); err != nil {
+			e.logf("events", "blocks refused: "+err.Error())
+			e.downloadBlocks = false
+			return false
+		}
+		e.lastTimeRequestBlock = 0
+		e.downloadBlocks = false
+	}
+	return true
+}
+
+// headersAgreeWithBlocks compares the newest headers with the blocks we hold.
+func (e *Engine) headersAgreeWithBlocks(data []byte) bool {
+	last := e.N.MyLastBlock()
+	count := int64(len(data) / types.ResumenSize)
+	for b := last; b > last-100 && b >= 0; b-- {
+		if b >= count {
+			return false // headers shorter than our chain
+		}
+		r := types.DecodeResumen(data[b*types.ResumenSize:])
+		if int64(r.Block) != b || r.BlockHash != crypto.IDHashFile(e.N.Lay.BlockFile(b)) {
+			return false
+		}
+	}
 	return true
 }
 
@@ -483,7 +561,9 @@ func (e *Engine) ParseProtocolLines() {
 					e.spammer(sl, peer.IP)
 				}
 			case cmd == "ADMINMSG":
-				e.ptcAdminMsg(line)
+				if e.AddIPControl(peer.IP) < 100 {
+					e.ptcAdminMsg(line)
+				}
 			case cmd == "$MNREPO":
 				n.AddWaitingMN(line)
 			case cmd == "$MNCHECK":
@@ -497,15 +577,23 @@ func (e *Engine) ParseProtocolLines() {
 			case cmd == "GETMNSFILE":
 				e.PTCSendLine(sl, e.ProtocolLine(17)+" $"+n.MNFile.Load())
 			case cmd == "GETCFGDATA":
-				e.PTCSendLine(sl, e.ProtocolLine(31)+n.CFG.DataStr())
+				if sc, ok := n.StoredConfig(); ok { // only a signed configuration is ever served
+					e.PTCSendLine(sl, e.ProtocolLine(31)+codec.IntToStr(sc.Seq)+" "+sc.Sig+" "+sc.Content)
+				}
 			case cmd == "MNFILE":
-				e.processMNFile(line)
+				if e.takeReply(sl, "MNFILE") { // FIX(H-06): only as an answer
+					e.processMNFile(line)
+				}
 			case cmd == "SETCFGDATA":
-				e.processCFGData(line)
+				if e.takeReply(sl, "CFG") { // FIX(C-01): only as an answer
+					e.processCFGData(line)
+				}
 			case cmd == "GETHEADUPDATE":
 				e.sendUpdateHeaders(sl, line)
 			case cmd == "HEADUPDATE":
-				e.headUpdate(line)
+				if e.takeReply(sl, "HEADUPD") { // FIX(H-05)
+					e.headUpdate(line)
+				}
 			case cmd == "$GETSUMARY":
 				e.sendSumary(sl)
 			case cmd == "$GETPSOS":
@@ -567,36 +655,32 @@ func (e *Engine) sendFile(sl int, label string, get func() ([]byte, error)) {
 }
 
 func (e *Engine) sendResumen(sl int) {
-	if e.N.UTCTime() < e.lastSendResumen+10 {
+	if !e.filePermit("$GETRESUMEN", e.peers.get(sl).IP) {
 		return
 	}
-	e.lastSendResumen = e.N.UTCTime()
 	e.sendFile(sl, "RESUMENFILE", func() ([]byte, error) { return e.N.Headers.Bytes() })
 }
 
 func (e *Engine) sendSumary(sl int) {
-	if e.N.UTCTime() < e.lastSendSumary+10 {
+	if !e.filePermit("$GETSUMARY", e.peers.get(sl).IP) {
 		return
 	}
-	e.lastSendSumary = e.N.UTCTime()
 	e.sendFile(sl, "SUMARYFILE", func() ([]byte, error) { return e.N.Summary.Bytes() })
 }
 
 // sendBlocks mirrors PTC_SendBlocks: first block = parameter 5 + 1.
 func (e *Engine) sendBlocks(sl int, line string) {
-	if e.N.UTCTime() < e.lastSendBlocks+10 {
+	if !e.filePermit("$LASTBLOCK", e.peers.get(sl).IP) {
 		return
 	}
-	e.lastSendBlocks = e.N.UTCTime()
 	first := codec.StrToIntDef(codec.Parameter(line, 5), -1) + 1
 	e.sendFile(sl, "BLOCKZIP", func() ([]byte, error) { return e.N.ZipBlocks(first) })
 }
 
 func (e *Engine) sendUpdateHeaders(sl int, line string) {
-	if e.N.UTCTime() < e.lastSendUpdHeaders+10 {
+	if !e.filePermit("GETHEADUPDATE", e.peers.get(sl).IP) {
 		return
 	}
-	e.lastSendUpdHeaders = e.N.UTCTime()
 	blk := codec.StrToIntDef(codec.Parameter(line, 5), 0)
 	e.PTCSendLine(sl, e.ProtocolLine(19)+" $"+e.N.Headers.LastHeadersString(int(blk)))
 }
@@ -605,21 +689,28 @@ func (e *Engine) sendUpdateHeaders(sl int, line string) {
 // MD5 of the text + CR LF matches the consensus MNs hash.
 func (e *Engine) processMNFile(line string) {
 	text := codec.ExtractMNsText(line)
-	if codec.Copy(crypto.MD5String(text+"\r\n"), 1, 5) == e.GetConsensus(CMNsHash) {
+	if codec.Copy(crypto.IDHash(text+"\r\n"), 1, 5) == e.GetConsensus(CMNsHash) {
 		e.N.MNFile.Save(text)
 	}
 }
 
-// processCFGData mirrors PTC_CFGData.
+// processCFGData accepts a signed configuration: `SETCFGDATA $<seq> <sig>
+// <content>`. FIX(C-01): the original compared 5 hex characters of an MD5
+// (mpprotocol.pas:1064-1080).
 func (e *Engine) processCFGData(line string) {
-	content := codec.ExtractMNsText(line)
-	if codec.Copy(crypto.MD5String(content), 0, 5) == e.GetConsensus(CCFGHash) {
-		e.N.CFG.Save(content)
-		e.N.CFG.SetDataStr(content)
-		e.logf("events", "Noso CFG updated!")
-	} else {
-		e.logf("events", "Failed CFG: "+codec.Copy(crypto.MD5String(content), 0, 5)+" <> "+e.GetConsensus(CCFGHash))
+	parts := strings.SplitN(codec.ExtractMNsText(line), " ", 3)
+	if len(parts) != 3 {
+		return
 	}
+	seq, ok := codec.StrToInt64(parts[0])
+	if !ok {
+		return
+	}
+	if err := e.N.AcceptConfig(node.SignedConfig{Seq: seq, Sig: parts[1], Content: parts[2]}); err != nil {
+		e.logf("events", "configuration refused: "+err.Error())
+		return
+	}
+	e.logf("events", "Noso CFG updated!")
 }
 
 // headUpdate mirrors PTC_HeadUpdate (mpprotocol.pas:1127-1172).
@@ -650,51 +741,34 @@ func (e *Engine) headUpdate(line string) {
 	}
 }
 
-// ptcAdminMsg mirrors PTC_AdminMSG for directives that change the CFG. The
-// signature is checked against the developer key; update/restart
-// directives are not executed (intentionally skipped, see port-status).
+// ptcAdminMsg handles `ADMINMSG <seq> <expiryBlock> <text_with_underscores>
+// <signature>`. FIX(H-02, H-03, C-08): the signature covers a sequence
+// number and an expiry height, the key comes from the configuration, and
+// the only directives that exist change the node configuration (no update,
+// no restart, no fund movement).
 func (e *Engine) ptcAdminMsg(line string) {
-	n := e.N
-	msgTime, msg, sig, hash := codec.Parameter(line, 5), codec.Parameter(line, 6), codec.Parameter(line, 7), codec.Parameter(line, 8)
-	if strings.Contains(e.adminSeen, hash) {
+	seq, ok1 := codec.StrToInt64(codec.Parameter(line, 5))
+	exp, ok2 := codec.StrToInt64(codec.Parameter(line, 6))
+	text := strings.ReplaceAll(codec.Parameter(line, 7), "_", " ")
+	if !ok1 || !ok2 {
 		return
 	}
-	msg = strings.ReplaceAll(msg, "_", " ")
-	if !crypto.VerifySignedString(msgTime+msg, sig, consensus.AdminPubKey) {
-		e.logf("events", "Directive wrong sign")
+	if _, err := e.N.AcceptDirective(seq, exp, text, codec.Parameter(line, 8)); err != nil {
+		e.logf("events", "directive refused: "+err.Error())
 		return
 	}
-	if crypto.MD5String(msgTime+msg+sig) != hash {
-		e.logf("events", "Directive wrong hash")
-		return
-	}
-	e.adminSeen += hash
-	cmd, param := strings.ToUpper(codec.Parameter(msg, 0)), codec.Parameter(msg, 1)
-	switch cmd {
-	case "SETMODE":
-		_ = n.CFG.SetData(param, 0)
-	case "ADDNODE":
-		_ = n.CFG.Add(param, 1)
-		e.SetNodesArray(n.CFG.Param(1))
-	case "DELNODE":
-		_ = n.CFG.Remove(param, 1)
-		e.SetNodesArray(n.CFG.Param(1))
-	case "ADDNTP":
-		_ = n.CFG.Add(param, 2)
-	case "DELNTP":
-		_ = n.CFG.Remove(param, 2)
-	case "ADDLOCKED":
-		_ = n.CFG.Add(param, 5)
-	case "DELLOCKED":
-		_ = n.CFG.Remove(param, 5)
-	case "ADDNOSOPAY":
-		_ = n.CFG.Add(param, 6)
-	case "DELNOSOPAY":
-		_ = n.CFG.Remove(param, 6)
-	case "CLEARCFG":
-		n.CFG.Clear(param)
-	case "RESTORECFG":
-		n.CFG.Restore()
-	}
+	e.SetNodesArray(e.N.CFG.Param(1))
 	e.OutgoingAdd(line)
+}
+
+// recoverPanic keeps a malformed input from taking the node down and closes
+// the offending connection. FIX(M-06, M-15): the original had no guard around
+// its thread bodies.
+func (e *Engine) recoverPanic(where string, c *Conn) {
+	if r := recover(); r != nil {
+		e.logf("exceps", fmt.Sprintf("panic in %s: %v", where, r))
+		if c != nil {
+			_ = c.Close()
+		}
+	}
 }

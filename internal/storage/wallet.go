@@ -15,6 +15,9 @@ type Wallet struct {
 	mu   sync.Mutex
 	path string
 	arr  []types.Wallet
+	// pass, when set, encrypts the file (FIX(H-10)); path then names the
+	// encrypted file.
+	pass []byte
 }
 
 // OpenWallet mirrors SetWalletFileName (nosowallcon.pas:60-70): a missing
@@ -33,11 +36,7 @@ func OpenWallet(path string) (w *Wallet, existed bool) {
 func (w *Wallet) Path() string { return w.path }
 
 func (w *Wallet) createNew() {
-	kp := crypto.GenerateKeyPair()
-	var nw types.Wallet
-	nw.Hash = crypto.GetAddressFromPublicKey(kp.PublicKey, 0)
-	nw.PublicKey, nw.PrivateKey = kp.PublicKey, kp.PrivateKey
-	w.Insert(nw)
+	w.Insert(newWalletRecord(crypto.GenerateKeyPair()))
 	w.Save()
 }
 
@@ -148,6 +147,12 @@ func (w *Wallet) Save() bool {
 		out = append(out, r.Encode()...)
 	}
 	w.mu.Unlock()
+	if len(w.pass) > 0 {
+		var err error
+		if out, err = sealWallet(out, w.pass); err != nil {
+			return false
+		}
+	}
 	if err := writeFileAtomic(w.path, out); err != nil {
 		_ = copyFile(w.path+".bak", w.path)
 		return false
@@ -162,6 +167,11 @@ func (w *Wallet) Load() bool {
 	raw, err := os.ReadFile(w.path)
 	if err != nil {
 		return false
+	}
+	if len(w.pass) > 0 {
+		if raw, err = openWallet(raw, w.pass); err != nil {
+			return false
+		}
 	}
 	n := len(raw) / types.WalletSize
 	if n == 0 {
@@ -199,7 +209,7 @@ func ReadAddressFile(path string) (types.Wallet, bool) {
 
 // SaveAddressFile mirrors SaveAddresstoFile.
 func SaveAddressFile(path string, d types.Wallet) bool {
-	return os.WriteFile(path, d.Encode(), 0o644) == nil
+	return os.WriteFile(path, d.Encode(), 0o600) == nil
 }
 
 // ImportFromBackup mirrors ImportAddressesFromBackup: every *.pkw below dir
@@ -215,4 +225,11 @@ func (w *Wallet) ImportFromBackup(dir string) int {
 		return nil
 	})
 	return added
+}
+
+func newWalletRecord(kp crypto.KeyPair) types.Wallet {
+	var nw types.Wallet
+	nw.Hash = crypto.GetAddressFromPublicKey(kp.PublicKey, 0)
+	nw.PublicKey, nw.PrivateKey = kp.PublicKey, kp.PrivateKey
+	return nw
 }

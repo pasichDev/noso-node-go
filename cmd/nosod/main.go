@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -16,14 +17,18 @@ import (
 	"github.com/pasichDev/noso-node-go/internal/cli"
 	"github.com/pasichDev/noso-node-go/internal/codec"
 	"github.com/pasichDev/noso-node-go/internal/control"
+	"github.com/pasichDev/noso-node-go/internal/logx"
 	"github.com/pasichDev/noso-node-go/internal/network"
 	"github.com/pasichDev/noso-node-go/internal/node"
 	"github.com/pasichDev/noso-node-go/internal/rpc"
+	"github.com/pasichDev/noso-node-go/internal/storage"
 )
 
 func main() {
 	data := flag.String("data", "NOSODATA", "data directory (same layout as the original NOSODATA folder)")
-	noSeeds := flag.Bool("no-seed-download", false, "do not download the default seed list on first start")
+	seedURL := flag.String("seed-url", "", "https URL of a signed seed list (needs ReleaseKey in advopt.txt); nothing is downloaded without it")
+	passFile := flag.String("wallet-pass-file", "", "file holding the wallet passphrase (or set NOSO_WALLET_PASSPHRASE)")
+	plainWallet := flag.Bool("insecure-plain-wallet", false, "keep private keys unencrypted in wallet.pkw (not recommended)")
 	noP2P := flag.Bool("no-p2p", false, "open the data directory and the RPC server but do not connect to peers")
 	noNTP := flag.Bool("no-ntp", false, "do not query NTP servers at start")
 	version := flag.Bool("version", false, "print the version and exit")
@@ -33,15 +38,30 @@ func main() {
 		return
 	}
 
-	var fetch func() string
-	if !*noSeeds {
-		fetch = cli.FetchDefaultSeeds
+	pass, err := walletPassphrase(*passFile)
+	if err != nil {
+		log.Fatalf("wallet passphrase: %v", err)
 	}
-	n, err := node.New(*data, fetch)
+	cfg := node.Config{WalletPassphrase: pass, InsecurePlainWallet: *plainWallet}
+	if *seedURL != "" {
+		cfg.FetchSeeds = func() string {
+			// the release key lives in advopt.txt, read before the node opens
+			var o storage.Options
+			_ = o.Load(filepath.Join(*data, "advopt.txt"))
+			return cli.FetchSeeds(*seedURL, o.ReleaseKey)
+		}
+	}
+	n, err := node.NewWithConfig(*data, cfg)
 	if err != nil {
 		log.Fatalf("cannot open data directory: %v", err)
 	}
-	logf := func(ch, msg string) { log.Printf("[%s] %s", ch, msg) }
+	n.EnsureRPCTokens()
+	limiter := &logx.Limiter{Rate: 200}
+	logf := func(ch, msg string) {
+		if limiter.Allow() {
+			log.Printf("[%s] %s", ch, logx.Sanitize(msg))
+		}
+	}
 	n.Log = logf
 	e := network.NewEngine(n)
 	e.Log = logf
@@ -52,7 +72,13 @@ func main() {
 	stop := make(chan bool, 1)
 	d.Quit = func(restart bool) { stop <- restart }
 	r.Restart = func() { stop <- true }
-	e.CommandHook = func(line string) { d.RunTo(line, func(s string) { logf("console", s) }) }
+	e.CommandHook = func(line string) {
+		if cli.Sensitive(line) { // FIX(H-10): never log key material
+			d.RunTo(line, func(string) {})
+			return
+		}
+		d.RunTo(line, func(s string) { logf("console", s) })
+	}
 
 	if !*noNTP {
 		e.UpdateTimeOffset(n.CFG.Param(2))
@@ -111,4 +137,13 @@ func absPath(p string) string {
 		return a
 	}
 	return p
+}
+
+// walletPassphrase reads the passphrase from a file or the environment.
+func walletPassphrase(file string) ([]byte, error) {
+	if file != "" {
+		b, err := os.ReadFile(file)
+		return []byte(strings.TrimRight(string(b), "\r\n")), err
+	}
+	return []byte(os.Getenv("NOSO_WALLET_PASSPHRASE")), nil
 }

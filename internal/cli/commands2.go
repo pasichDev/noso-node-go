@@ -80,20 +80,35 @@ func cmdSystem(d *Dispatcher, l string) {
 	}
 }
 
-func fetchSeeds() string {
-	cl := http.Client{Timeout: 3 * time.Second}
-	resp, err := cl.Get(repoSeedsURL)
-	if err != nil {
+// FetchSeeds downloads a seed list and its detached signature (url + ".sig",
+// Base64) and returns the list only if the signature verifies under the
+// release key. FIX(M-02): the original fetched an unauthenticated list with
+// certificate checks off (nosonosocfg.pas:81, mpred.pas:1008-1025).
+func FetchSeeds(url, releaseKey string) string {
+	if releaseKey == "" || !strings.HasPrefix(url, "https://") {
 		return ""
 	}
-	defer resp.Body.Close()
-	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	return codec.Trim(string(b))
+	get := func(u string) string {
+		resp, err := seedHTTPClient.Get(u)
+		if err != nil {
+			return ""
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		return codec.Trim(string(b))
+	}
+	list, sig := get(url), get(url+".sig")
+	if list == "" || !crypto.VerifyCanonical(releaseKey, sig, "SEEDS1", list) {
+		return ""
+	}
+	return list
 }
 
-// FetchDefaultSeeds downloads the default seed list (used by the daemon on
-// first start, nosonosocfg.pas:81).
-func FetchDefaultSeeds() string { return fetchSeeds() }
+func fetchSeeds() string { return "" }
+
+// FetchDefaultSeeds is kept for callers that have no URL configured: nothing
+// is downloaded.
+func FetchDefaultSeeds() string { return "" }
 
 func walletBalance(d *Dispatcher) int64 {
 	var total int64
@@ -259,7 +274,7 @@ func showBlockInfo(d *Dispatcher, n int64) {
 	}
 	h := b.Header
 	d.log("Block info: %d", n)
-	d.log("Hash  :       %s", crypto.MD5File(d.N.Lay.BlockFile(n)))
+	d.log("Hash  :       %s", crypto.IDHashFile(d.N.Lay.BlockFile(n)))
 	d.log("Number:       %d", h.Number)
 	d.log("Time start:   %d (%s)", h.TimeStart, timestampToDate(h.TimeStart))
 	d.log("Time end:     %d (%s)", h.TimeEnd, timestampToDate(h.TimeEnd))
@@ -599,23 +614,60 @@ func cmdRestoreChain(d *Dispatcher, l string) {
 	}
 }
 
-// cmdDirective mirrors SendAdminMessage (mpparser.pas:1132-1150).
+// cmdDirective signs and broadcasts an admin directive:
+// `directive <sequence> <expiryBlock> <text>`. It needs the private key of the
+// configured AdminKey in the wallet. FIX(H-02, H-03).
 func cmdDirective(d *Dispatcher, l string) {
-	i := d.N.Wallet.IndexOf(consensus.AdminHash)
-	if i < 0 {
-		d.log("Only the Noso developers can do this.")
+	key := d.N.Options().AdminKey
+	var priv string
+	for _, w := range d.N.Wallet.All() {
+		if key != "" && w.PublicKey == key {
+			priv = w.PrivateKey
+		}
+	}
+	if priv == "" {
+		d.log("No private key for the configured AdminKey in this wallet.")
 		return
 	}
 	if !d.needNet() {
 		return
 	}
-	msg := codec.Copy(l, 11, len(l))
-	cur := d.N.UTCTimeStr()
-	sig := crypto.GetStringSigned(cur+msg, d.N.Wallet.At(i).PrivateKey)
-	hash := crypto.MD5String(cur + msg + sig)
-	m2 := strings.ReplaceAll(msg, " ", "_")
-	d.E.OutgoingAdd(node.PTCHeader(d.N) + "ADMINMSG " + cur + " " + m2 + " " + sig + " " + hash)
-	d.log("Directive sent: %s", strings.ReplaceAll(m2, "_", " "))
+	seq, ok1 := codec.StrToInt64(p(l, 1))
+	exp, ok2 := codec.StrToInt64(p(l, 2))
+	text := codec.Trim(codec.Copy(l, len(p(l, 0))+len(p(l, 1))+len(p(l, 2))+4, len(l)))
+	if !ok1 || !ok2 || text == "" {
+		d.log("Syntax: directive {sequence} {expiryBlock} {text}")
+		return
+	}
+	sig := crypto.SignCanonical(priv, "DIRECTIVE1", node.DirectiveFields(seq, exp, text)...)
+	d.E.OutgoingAdd(node.PTCHeader(d.N) + "ADMINMSG " + codec.IntToStr(seq) + " " + codec.IntToStr(exp) + " " +
+		strings.ReplaceAll(text, " ", "_") + " " + sig)
+	d.log("Directive sent: %s", text)
+}
+
+// cmdSignCfg signs the current nosocfg text with the wallet key matching
+// ConfigKey and stores the signature so the node can serve it:
+// `signcfg <sequence>`. FIX(C-01).
+func cmdSignCfg(d *Dispatcher, l string) {
+	key := d.N.Options().ConfigKey
+	for _, w := range d.N.Wallet.All() {
+		if key != "" && w.PublicKey == key {
+			seq, ok := codec.StrToInt64(p(l, 1))
+			if !ok {
+				d.log("Syntax: signcfg {sequence}")
+				return
+			}
+			content := d.N.CFG.DataStr()
+			sig := crypto.SignCanonical(w.PrivateKey, "CFG1", node.CFGFields(seq, content)...)
+			if err := d.N.AcceptConfig(node.SignedConfig{Seq: seq, Content: content, Sig: sig}); err != nil {
+				d.log("Error: %v", err)
+				return
+			}
+			d.log("Configuration signed with sequence %d", seq)
+			return
+		}
+	}
+	d.log("No private key for the configured ConfigKey in this wallet.")
 }
 
 // cmdPost mirrors PostOffer (mpparser.pas:1548-1600): it only validates
@@ -683,3 +735,7 @@ func cmdTT(d *Dispatcher, l string) {
 		d.log("%s %s %d", e[i].IPAndPort, codec.Copy(e[i].Address, 1, 5), e[i].Age)
 	}
 }
+
+// seedHTTPClient verifies certificates (the default transport does); tests
+// replace it to trust a local server.
+var seedHTTPClient = &http.Client{Timeout: 5 * time.Second}

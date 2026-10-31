@@ -128,8 +128,14 @@ func (n *Node) BuildNewBlock(number, timestamp int64, targetHash, miner, solutio
 		switch ord.OrderType {
 		case "CUSTOM":
 			opAddr := crypto.GetAddressFromPublicKey(ord.Sender, 0)
-			if n.Summary.CustomizationValid(opAddr, ord.Receiver, number, false) {
-				minerFee += ord.AmmountFee
+			// FIX(C-06, M-01): exact fee, no amount, valid unused alias.
+			fee := consensus.GetCustFee(number)
+			if ord.AmmountFee != fee || ord.AmmountTrf != 0 || !ValidAlias(ord.Receiver) ||
+				n.aliasTaken(ord.Receiver, list) {
+				continue
+			}
+			if n.Summary.CustomizationValid(opAddr, ord.Receiver, number, false, fee) {
+				minerFee += fee
 				ord.Block = int32(number)
 				ord.Sender = codec.Truncate(opAddr, 120)
 				list = append(list, ord)
@@ -137,7 +143,13 @@ func (n *Node) BuildNewBlock(number, timestamp int64, targetHash, miner, solutio
 			}
 		case "TRFR":
 			opAddr := ord.Address
-			if n.Summary.ValidPay(opAddr, ord.AmmountFee+ord.AmmountTrf, number) {
+			// FIX(C-05): amounts are range checked and summed without overflow
+			// (mpblock.pas:207 added them unchecked).
+			total, ok := consensus.CheckedAdd(ord.AmmountFee, ord.AmmountTrf)
+			if !ok || !ValidReceiver(ord.Receiver) {
+				continue
+			}
+			if n.Summary.ValidPay(opAddr, total, number) {
 				minerFee += ord.AmmountFee
 				n.Summary.CreditTo(ord.Receiver, ord.AmmountTrf, number)
 				ord.Block = int32(number)
@@ -146,40 +158,31 @@ func (n *Node) BuildNewBlock(number, timestamp int64, targetHash, miner, solutio
 				blockTrfrs++
 			}
 		case "SNDGVT":
-			if ord.Sender != consensus.AdminPubKey {
-				break
-			}
+			// FIX(M-14): the owner's own key authorises the transfer, and the
+			// fee counts only after the debit succeeded (mpblock.pas:217-229).
 			opAddr := crypto.GetAddressFromPublicKey(ord.Sender, 0)
-			if n.Summary.BalanceIndexed(opAddr) < ord.AmmountFee {
+			fee := consensus.GetCustFee(number)
+			if ord.AmmountFee != fee || ord.AmmountTrf != 0 || !ValidReceiver(ord.Receiver) {
+				continue
+			}
+			if !n.Summary.ValidPay(opAddr, fee, number) {
 				continue
 			}
 			if n.GVTs.ChangeOwner(int(codec.StrToIntDef(ord.Reference, 100)), opAddr, ord.Receiver) == 0 {
-				minerFee += ord.AmmountFee
+				minerFee += fee
 				gvtsTransferred++
-				n.Summary.ValidPay(opAddr, ord.AmmountFee, number)
 				ord.Block = int32(number)
 				ord.Sender = codec.Truncate(opAddr, 120)
 				list = append(list, ord)
+			} else {
+				n.Summary.CreditTo(opAddr, fee, number) // refund
 			}
 		}
 	}
 
-	// Project payments from the CFG (mpblock.pas:233-258).
-	if pay := n.CFG.Param(6); pay != "" {
-		pay = strings.ReplaceAll(pay, ":", "")
-		pay = strings.ReplaceAll(pay, ",", " ")
-		if codec.StrToIntDef(codec.Parameter(pay, 0), 0) == number {
-			src, dst := codec.Parameter(pay, 1), codec.Parameter(pay, 2)
-			if crypto.IsValidHashAddress(dst) && crypto.IsValidHashAddress(src) {
-				amt := codec.StrToInt64Def(codec.Parameter(pay, 3), 0)
-				if amt > 0 && n.Summary.ValidPay(src, amt, number) {
-					n.Summary.CreditTo(dst, amt, number)
-					list = append(list, createNosoPayOrder(number, src, dst, timestamp, amt, myLast))
-					_ = n.CFG.Remove(n.CFG.Param(6), 6)
-				}
-			}
-		}
-	}
+	// FIX(C-01): pending project payments in the configuration (NOSOPAY,
+	// mpblock.pas:233-258) are no longer executed: configuration data cannot
+	// move funds.
 
 	// Project funds payment.
 	var devTotal int64
@@ -237,7 +240,9 @@ func (n *Node) BuildNewBlock(number, timestamp int64, targetHash, miner, solutio
 	powTotal := consensus.GetBlockReward(number) + minerFee - posTotal - mnsTotal - devTotal
 	n.Summary.CreditTo(miner, powTotal, number)
 	n.Summary.CreditTo(storage.GenesisAddress, 0, number)
-	n.Summary.UpdateChanges()
+	if err := n.Summary.UpdateChanges(); err != nil {
+		return nil, err // FIX(M-12): stop on a failed write (nosounit.pas:549-553)
+	}
 	n.Summary.SetLastOp(number)
 	n.Wallet.ClearPendings()
 
@@ -274,6 +279,7 @@ func (n *Node) BuildNewBlock(number, timestamp int64, targetHash, miner, solutio
 	blk := &storage.Block{Header: h, Orders: list, PosPay: posReward, MNsPay: mnsReward, MNsAddrs: mnsAddrs}
 	if err := n.Blocks.Write(blk); err != nil {
 		n.logf("exceps", "*****CRITICAL***** Error building block: "+codec.IntToStr(number))
+		return nil, err // FIX(M-12): do not advance the chain on a failed write (mpblock.pas:536-542)
 	}
 	_ = n.ZipSummary()
 
@@ -282,7 +288,9 @@ func (n *Node) BuildNewBlock(number, timestamp int64, targetHash, miner, solutio
 	n.mu.Unlock()
 	n.UpdateMyData()
 	n.Summary.SetHash()
-	n.Headers.Add(number, n.MyLastBlockHash(), n.Summary.Hash())
+	if !n.Headers.Add(number, n.MyLastBlockHash(), n.Summary.Hash()) {
+		return nil, errHeaderWrite
+	}
 	n.Headers.SetHash()
 	if number > 0 && n.OnNewBlock != nil && n.serverActive() {
 		n.OnNewBlock()
@@ -311,10 +319,8 @@ func (n *Node) CheckForMyPending() {
 
 // AddBlockToSummary mirrors AddBlockToSumary (mpdisk.pas:660-738): the
 // effect of block number on the summary is re-derived from the block file.
-// COMPAT: the rebuild path touches AdminHash (CreditTo(AdminHash,0,N)) while
-// the build path touches the genesis account; both quirks are kept, so a
-// summary completed from blocks differs from one built live by the
-// presence/LastOP of the AdminHash account.
+// FIX(M-11): build and replay touch the same account; an unfunded transfer
+// makes the block invalid instead of charging the miner.
 func (n *Node) AddBlockToSummary(number int64, saveAndUpdate bool) error {
 	blk, err := n.Blocks.Read(number)
 	if err != nil && blk == nil {
@@ -329,17 +335,19 @@ func (n *Node) AddBlockToSummary(number int64, saveAndUpdate bool) error {
 	for _, o := range blk.Orders {
 		switch o.OrderType {
 		case "CUSTOM":
-			n.Summary.CustomizationValid(o.Sender, o.Receiver, number, true)
+			n.Summary.CustomizationValid(o.Sender, o.Receiver, number, true, consensus.GetCustFee(number))
 		case "SNDGVT":
 			gvts++
 			n.Summary.Pay(o.Sender, consensus.GetCustFee(number), number)
 			n.GVTs.ChangeOwner(int(codec.StrToIntDef(o.Reference, 100)), o.Sender, o.Receiver)
 		case "TRFR":
-			if n.Summary.ValidPay(o.Sender, o.AmmountFee+o.AmmountTrf, number) {
-				n.Summary.CreditTo(o.Receiver, o.AmmountTrf, number)
-			} else {
-				n.Summary.Pay(h.AccountMiner, o.AmmountFee, number)
+			total, ok := consensus.CheckedAdd(o.AmmountFee, o.AmmountTrf)
+			if !ok || !n.Summary.ValidPay(o.Sender, total, number) {
+				// FIX(C-03): an unfunded transfer makes the block invalid
+				// (mpdisk.pas:695-697 let the miner pay the fee instead).
+				return errUnfunded
 			}
+			n.Summary.CreditTo(o.Receiver, o.AmmountTrf, number)
 		case "PROJCT":
 			n.Summary.CreditTo(consensus.ProjectFunds, o.AmmountTrf, number)
 			n.Summary.Pay(h.AccountMiner, o.AmmountTrf, number)
@@ -363,9 +371,13 @@ func (n *Node) AddBlockToSummary(number int64, saveAndUpdate bool) error {
 		}
 		n.Summary.Pay(h.AccountMiner, int64(len(blk.MNsAddrs))*blk.MNsPay, number)
 	}
-	n.Summary.CreditTo(consensus.AdminHash, 0, number)
+	// FIX(M-11): the replay touches the same account as the build path
+	// (mpdisk.pas:729 used AdminHash, mpblock.pas:355 the genesis account).
+	n.Summary.CreditTo(storage.GenesisAddress, 0, number)
 	if saveAndUpdate {
-		n.Summary.UpdateChanges()
+		if err := n.Summary.UpdateChanges(); err != nil {
+			return err
+		}
 	}
 	if number%1000 == 0 {
 		_ = copyFile(n.Lay.Summary, n.Lay.MarksDir+"/"+codec.IntToStr(number)+".bak")
@@ -385,8 +397,15 @@ func (n *Node) CompleteSummary() error {
 	start := n.Summary.LastOp() + 1
 	finish := n.MyLastBlock()
 	n.logf("console", "Complete summary")
+	_ = n.Summary.Backup()
 	for i := start; i <= finish; i++ {
 		if err := n.AddBlockToSummary(i, true); err != nil {
+			// FIX(C-03): a block that cannot be replayed is removed together
+			// with everything after it, and the summary is restored.
+			_ = n.Summary.Restore()
+			n.Summary.CreateIndex()
+			n.RemoveBlocks(i)
+			n.UpdateMyData()
 			return err
 		}
 	}
@@ -449,19 +468,26 @@ func (n *Node) UndoLastBlock() {
 	n.logf("console", "Block undone: "+codec.IntToStr(num))
 }
 
-// RemoveBlocks mirrors RemoveBlocks (mpblock.pas:746-760): delete every
-// block file from upTo upward; returns the number removed.
+// MaxReorgDepth is the most blocks a node will delete on the word of its
+// peers. FIX(H-04): RemoveBlocks (mpblock.pas:746-760) deleted any number of
+// blocks and looped forever when upTo was 0.
+const MaxReorgDepth = 20
+
+// RemoveBlocks deletes the block files from upTo upward and returns how many
+// were removed, or -1 when that would exceed MaxReorgDepth (nothing is
+// deleted then). Block 0 is never removed.
 func (n *Node) RemoveBlocks(upTo int64) int {
+	if upTo < 1 {
+		upTo = 1
+	}
+	last := n.Blocks.LastUpdated()
+	if last-upTo+1 > MaxReorgDepth {
+		return -1
+	}
 	removed := 0
-	for {
-		last := n.Blocks.LastUpdated()
-		if last >= upTo {
-			n.Blocks.Delete(last)
-			removed++
-		}
-		if last < upTo {
-			break
-		}
+	for b := last; b >= upTo; b-- {
+		n.Blocks.Delete(b)
+		removed++
 	}
 	n.SetMyLastBlock(n.Blocks.LastUpdated())
 	return removed
@@ -488,3 +514,21 @@ func (n *Node) NSLBlockOrders(line string) string {
 	}
 	return codec.Trim(res)
 }
+
+var errHeaderWrite = nodeError("headers file write failed")
+
+// aliasTaken reports whether an alias is already used in the summary or by an
+// order already placed in this block. FIX(M-01).
+func (n *Node) aliasTaken(alias string, list []types.Order) bool {
+	if slot, _ := n.Summary.GetIndexPosition(alias, true); slot >= 0 {
+		return true
+	}
+	for _, o := range list {
+		if o.OrderType == "CUSTOM" && o.Receiver == alias {
+			return true
+		}
+	}
+	return false
+}
+
+var errUnfunded = nodeError("block contains an unfunded transfer")

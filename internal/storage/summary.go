@@ -1,10 +1,11 @@
 package storage
 
 import (
+	"math"
 	"os"
 	"sync"
 
-	"github.com/pasichDev/noso-node-go/internal/codec"
+	"github.com/pasichDev/noso-node-go/internal/consensus"
 	"github.com/pasichDev/noso-node-go/internal/crypto"
 	"github.com/pasichDev/noso-node-go/internal/types"
 )
@@ -63,7 +64,7 @@ func (s *SummaryDB) rebuildIndexLocked() {
 	if len(s.recs) > 0 {
 		s.lastOp = s.recs[0].LastOP
 	}
-	s.hash = crypto.MD5File(s.path)
+	s.hash = crypto.IDHashFile(s.path)
 }
 
 func (s *SummaryDB) addIndex(r types.Summary, slot int64) {
@@ -95,12 +96,12 @@ func (s *SummaryDB) CreateNew(addBlockZero bool) {
 	s.block, s.brHash = nil, nil
 	if addBlockZero {
 		s.creditLocked(GenesisAddress, Premine, 0)
-		s.updateChangesLocked()
+		_ = s.updateChangesLocked()
 		s.block = nil
 		s.brHash = nil
 		s.lastOp = 0
 	}
-	s.hash = crypto.MD5File(s.path)
+	s.hash = crypto.IDHashFile(s.path)
 }
 
 // Hash returns the cached MD5 of the file (MySumarioHash).
@@ -114,7 +115,7 @@ func (s *SummaryDB) Hash() string {
 func (s *SummaryDB) SetHash() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.hash = crypto.MD5File(s.path)
+	s.hash = crypto.IDHashFile(s.path)
 }
 
 // LastOp returns SummaryLastop.
@@ -237,6 +238,11 @@ func (s *SummaryDB) ValidPay(addr string, amount, blockNumber int64) bool {
 }
 
 func (s *SummaryDB) validPayLocked(addr string, amount, blockNumber int64) bool {
+	// FIX(C-05): negative or absurd amounts are refused (nosounit.pas:394-432
+	// compared Balance<amount only, so a negative amount minted coins).
+	if amount < 0 || amount > consensus.MaxSupply {
+		return false
+	}
 	if i := s.findBlock(addr); i >= 0 {
 		if s.block[i].rec.Balance < amount {
 			return false
@@ -267,6 +273,9 @@ func (s *SummaryDB) Pay(addr string, amount, blockNumber int64) {
 }
 
 func (s *SummaryDB) payLocked(addr string, amount, blockNumber int64) {
+	if amount < 0 { // FIX(C-05)
+		return
+	}
 	if i := s.findBlock(addr); i >= 0 {
 		s.block[i].rec.Balance -= amount
 		s.block[i].rec.LastOP = blockNumber
@@ -281,35 +290,49 @@ func (s *SummaryDB) payLocked(addr string, amount, blockNumber int64) {
 	s.insBlock(r, slot)
 }
 
-// CreditTo mirrors nosounit.pas:466-491. COMPAT: the receiver is never
-// validated, and an over-long address is stored truncated to String[40],
-// so later lookups with the full string miss and create another record.
-func (s *SummaryDB) CreditTo(addr string, amount, blockNumber int64) {
+// CreditTo mirrors nosounit.pas:466-491. FIX(C-05, L-08): negative amounts,
+// balance overflow and empty or over-long names are refused (the original
+// accepted any receiver text and truncated it to String[40]); it reports
+// whether the credit was applied.
+func (s *SummaryDB) CreditTo(addr string, amount, blockNumber int64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.creditLocked(addr, amount, blockNumber)
+	return s.creditLocked(addr, amount, blockNumber)
 }
 
-func (s *SummaryDB) creditLocked(addr string, amount, blockNumber int64) {
+func (s *SummaryDB) creditLocked(addr string, amount, blockNumber int64) bool {
+	// FIX(C-05, L-08): negative amounts, balance overflow and over-long or
+	// empty names are refused (nosounit.pas:466-491 accepted them and
+	// truncated names to 40 characters).
+	if amount < 0 || amount > consensus.MaxSupply || addr == "" || len(addr) > 40 {
+		return false
+	}
 	if i := s.findBlock(addr); i >= 0 {
+		if s.block[i].rec.Balance > math.MaxInt64-amount {
+			return false
+		}
 		s.block[i].rec.Balance += amount
 		s.block[i].rec.LastOP = blockNumber
-		return
+		return true
 	}
 	slot, r := s.lookupLocked(addr, false)
+	if r.Balance > math.MaxInt64-amount {
+		return false
+	}
 	r.Balance += amount
 	r.LastOP = blockNumber
 	if slot < 0 {
-		r.Hash = codec.Truncate(addr, 40)
+		r.Hash = addr
 	}
 	s.insBlock(r, slot)
+	return true
 }
 
 // CustomizationValid mirrors IsCustomizacionValid (nosounit.pas:494-526).
-// COMPAT: the fee is the literal 25000 (not GetCustFee), and the already
-// pending branch (lines 505-512) does not update LastOP while the disk
-// branch does.
-func (s *SummaryDB) CustomizationValid(addr, custom string, blockNumber int64, force bool) bool {
+// FIX(C-06): the fee charged is the caller's exact fee (the original debited
+// the literal 25000 while the miner collected the order's own fee), and the
+// already-pending branch now updates LastOP like the disk branch.
+func (s *SummaryDB) CustomizationValid(addr, custom string, blockNumber int64, force bool, fee int64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if i := s.findBlock(addr); i >= 0 {
@@ -317,25 +340,26 @@ func (s *SummaryDB) CustomizationValid(addr, custom string, blockNumber int64, f
 		if r.Custom != "" && !force {
 			return false
 		}
-		if r.Balance < 25000 && !force {
+		if r.Balance < fee && !force {
 			return false
 		}
 		r.Custom = custom
-		r.Balance -= 25000
+		r.Balance -= fee
+		r.LastOP = blockNumber
 		return true
 	}
 	slot, r := s.lookupLocked(addr, false)
 	if slot < 0 {
 		return false
 	}
-	if r.Balance < 25000 && !force {
+	if r.Balance < fee && !force {
 		return false
 	}
 	if r.Custom != "" && !force {
 		return false
 	}
 	r.Custom = custom
-	r.Balance -= 25000
+	r.Balance -= fee
 	r.LastOP = blockNumber
 	s.insBlock(r, slot)
 	return true
@@ -344,15 +368,18 @@ func (s *SummaryDB) CustomizationValid(addr, custom string, blockNumber int64, f
 // UpdateChanges mirrors UpdateSummaryChanges (nosounit.pas:529-557): the
 // block records are written to their slots (new ones appended) and the
 // cached hash and last operation are refreshed.
-func (s *SummaryDB) UpdateChanges() {
+func (s *SummaryDB) UpdateChanges() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.updateChangesLocked()
+	return s.updateChangesLocked()
 }
 
-func (s *SummaryDB) updateChangesLocked() {
+func (s *SummaryDB) updateChangesLocked() error {
 	f, err := os.OpenFile(s.path, os.O_RDWR, 0o644)
-	if err == nil {
+	if err != nil {
+		return err // FIX(M-12): write failures are reported (nosounit.pas:549-553 ignored them)
+	}
+	{
 		defer f.Close()
 		for i := range s.block {
 			b := &s.block[i]
@@ -366,14 +393,20 @@ func (s *SummaryDB) updateChangesLocked() {
 				}
 				s.recs[b.slot] = b.rec
 			}
-			_, _ = f.WriteAt(b.rec.Encode(), b.slot*types.SummarySize)
+			if _, werr := f.WriteAt(b.rec.Encode(), b.slot*types.SummarySize); werr != nil {
+				err = werr
+			}
+		}
+		if serr := f.Sync(); serr != nil && err == nil {
+			err = serr
 		}
 	}
 	s.lastOp = 0
 	if len(s.recs) > 0 {
 		s.lastOp = s.recs[0].LastOP
 	}
-	s.hash = crypto.MD5File(s.path)
+	s.hash = crypto.IDHashFile(s.path)
+	return err
 }
 
 // Bytes returns the file content (GetSummaryAsMemStream).

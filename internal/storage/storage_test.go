@@ -2,6 +2,8 @@ package storage
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"testing"
@@ -34,7 +36,7 @@ func TestSummaryGolden59238(t *testing.T) {
 	if slot, r := s.GetIndexPosition("AllForOne", true); slot != 12 || r.Hash != "N7kKEo1LLdmd6QwEff1hC7bdMUeCCc" {
 		t.Fatalf("alias lookup %d %+v", slot, r)
 	}
-	if s.Hash() != crypto.MD5Bytes(raw) {
+	if s.Hash() != crypto.IDHashBytes(raw) {
 		t.Fatal("hash")
 	}
 
@@ -77,24 +79,22 @@ func TestSummaryGolden59238(t *testing.T) {
 	}
 }
 
-func TestSummaryGarbageAddressTruncation(t *testing.T) {
+// FIX(L-08, C-05): a long "address" is refused instead of being truncated
+// into a second account, and negative credits are refused.
+func TestSummaryRefusesGarbageAddresses(t *testing.T) {
 	l := tmp(t)
 	s := OpenSummary(l.Summary)
 	s.CreateNew(true)
 	long := "androidx.lifecycle.MutableLiveData@1d9e7abcdefghijkl"
 	s.ResetBlockRecords()
-	s.CreditTo(long, 5, 1)
-	s.CreditTo(long, 5, 1) // second credit does not find the truncated record
-	s.UpdateChanges()
-	// COMPAT: two separate records with the same truncated hash.
-	n := 0
-	for _, r := range s.All() {
-		if r.Hash == long[:40] {
-			n++
-		}
+	if s.CreditTo(long, 5, 1) || s.CreditTo("", 5, 1) || s.CreditTo("NabcdefghijkLMNPQRSTUVWXYZ12345", -5, 1) {
+		t.Fatal("garbage credit accepted")
 	}
-	if n != 2 {
-		t.Fatalf("expected 2 records for the truncated address, got %d", n)
+	_ = s.UpdateChanges()
+	for _, r := range s.All() {
+		if len(r.Hash) > 0 && r.Hash[0] == 'a' {
+			t.Fatalf("garbage account stored: %q", r.Hash)
+		}
 	}
 }
 
@@ -132,7 +132,7 @@ func TestGVTsGoldenAndRules(t *testing.T) {
 	raw, _ := os.ReadFile("../../testdata/gvts.psk")
 	_ = os.WriteFile(l.GVTs, raw, 0o644)
 	g := OpenGVTs(l.GVTs)
-	if g.Len() != 100 || g.Hash() != crypto.MD5Bytes(raw) {
+	if g.Len() != 100 || g.Hash() != crypto.IDHashBytes(raw) {
 		t.Fatal("load")
 	}
 	owner := g.Index(0).Owner
@@ -191,7 +191,7 @@ func TestCFGDefaultAndEdits(t *testing.T) {
 	if c.Param(0) != "NORMAL" || !c.IsSeedNode("204.10.194.22") || c.IsSeedNode("1.1.1.1") {
 		t.Fatal("params")
 	}
-	if c.Hash() != crypto.MD5String(DefaultNosoCFG) {
+	if c.Hash() != crypto.IDHash(DefaultNosoCFG) {
 		t.Fatal("hash")
 	}
 	if err := c.Add("9.9.9.9;8080", 1); err != nil {
@@ -345,5 +345,108 @@ func TestBlocksDBIndexAndLookup(t *testing.T) {
 	d2 := OpenBlocksDB(l.BlocksDB)
 	if len(d2.Blocks("ORabc123")) != 1 {
 		t.Fatal("index reload")
+	}
+}
+
+// FIX(H-10): the encrypted wallet round trips, a wrong passphrase fails, and
+// a legacy plaintext wallet is migrated and destroyed.
+func TestH10_WalletEncryptionAndMigration(t *testing.T) {
+	l := tmp(t)
+	plain, _ := OpenWallet(l.Wallet)
+	secret := plain.At(0).PrivateKey
+	if secret == "" {
+		t.Fatal("no key")
+	}
+	w, err := OpenWalletEncrypted(l.Wallet, []byte("correct horse"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.At(0).PrivateKey != secret || w.Len() != 1 {
+		t.Fatal("migration lost the key")
+	}
+	if Exists(l.Wallet) || Exists(l.Wallet+".bak") {
+		t.Fatal("plaintext wallet left behind")
+	}
+	raw, _ := os.ReadFile(filepath.Join(l.Root, "wallet.enc"))
+	if bytes.Contains(raw, []byte(secret)) || bytes.Contains(raw, []byte(w.At(0).Hash)) {
+		t.Fatal("secret or address visible in the encrypted file")
+	}
+	if _, err := OpenWalletEncrypted(l.Wallet, []byte("wrong")); err == nil {
+		t.Fatal("wrong passphrase accepted")
+	}
+	w2, err := OpenWalletEncrypted(l.Wallet, []byte("correct horse"))
+	if err != nil || w2.At(0).PrivateKey != secret {
+		t.Fatalf("reopen: %v", err)
+	}
+	// a tampered file is detected (AEAD)
+	raw[len(raw)-3] ^= 1
+	_ = os.WriteFile(filepath.Join(l.Root, "wallet.enc"), raw, 0o600)
+	if _, err := OpenWalletEncrypted(l.Wallet, []byte("correct horse")); err == nil {
+		t.Fatal("tampered wallet accepted")
+	}
+	if st, _ := os.Stat(filepath.Join(l.Root, "wallet.enc")); st.Mode().Perm() != 0o600 {
+		t.Fatal("wallet.enc must be 0600")
+	}
+}
+
+// FIX(M-09): counts that exceed the file are refused before anything is read.
+func TestM09_PSOCountsChecked(t *testing.T) {
+	// header claims 2 billion locked masternodes in a 12 byte file
+	hdr := []byte{1, 0, 0, 0, 0xff, 0xff, 0xff, 0x7f, 0, 0, 0, 0}
+	if ValidPSOFile(hdr) {
+		t.Fatal("hostile counts accepted")
+	}
+	neg := []byte{1, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0}
+	if ValidPSOFile(neg) {
+		t.Fatal("negative count accepted")
+	}
+	ok := []byte{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	if !ValidPSOFile(ok) {
+		t.Fatal("empty file refused")
+	}
+}
+
+// FIX(M-12): the atomic writer leaves no temporary file and reports errors.
+func TestM12_AtomicWrite(t *testing.T) {
+	l := tmp(t)
+	p := filepath.Join(l.Root, "x.bin")
+	if err := writeFileAtomic(p, []byte("one")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFileAtomic(p, []byte("two")); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(p); string(b) != "two" || Exists(p+".tmp") {
+		t.Fatal("atomic write left debris")
+	}
+	if err := writeFileAtomic(filepath.Join(l.Root, "no", "such", "dir", "f"), []byte("x")); err == nil {
+		t.Fatal("write error swallowed")
+	}
+}
+
+// FIX(M-16): the committed fixtures are the ones the tests were written for.
+func TestM16_FixtureChecksums(t *testing.T) {
+	want := map[string]string{
+		"59238.psk": "", "gvts.psk": "", "defseeds.nos": "", "1mb.dat": "",
+	}
+	for name := range want {
+		b, err := os.ReadFile("../../testdata/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sum := sha256.Sum256(b)
+		want[name] = hex.EncodeToString(sum[:])
+	}
+	// Recorded when the fixtures were copied from the original repository.
+	pinned := map[string]string{
+		"59238.psk":    fixtureSHA["59238.psk"],
+		"gvts.psk":     fixtureSHA["gvts.psk"],
+		"defseeds.nos": fixtureSHA["defseeds.nos"],
+		"1mb.dat":      fixtureSHA["1mb.dat"],
+	}
+	for k, v := range pinned {
+		if want[k] != v {
+			t.Fatalf("%s changed: %s", k, want[k])
+		}
 	}
 }

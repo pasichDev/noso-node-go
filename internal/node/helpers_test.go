@@ -22,3 +22,5 @@ func writeFile(t *testing.T, p string, b []byte) {
 		t.Fatal(err)
 	}
 }
+
+func itoa64(v int64) string { return itoa(v) }

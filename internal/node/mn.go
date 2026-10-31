@@ -21,6 +21,9 @@ type MNode struct {
 	Total       int32
 	Validations int32
 	Hash        string // String[32]
+	// FIX(H-01): the fund owner's public key and signature over the report.
+	Pub string
+	Sig string
 }
 
 // MNCheck is TMNCheck, a masternode verification report.
@@ -99,17 +102,18 @@ func (n *Node) MyMNListed(ip string) bool {
 	return false
 }
 
-// IsLegitNewNode mirrors nosomasternodes.pas:374-399. COMPAT: with an
-// empty list every report is accepted without checking funds, and the
-// balance/validation tests run once per existing entry.
+// IsLegitNewNode mirrors nosomasternodes.pas:374-399. FIX(H-01): the funds
+// requirement and the "no validations yet" rule apply to EVERY report; in the
+// original they lived inside the loop over the existing list, so the first
+// report of a block skipped them all.
 func (n *Node) IsLegitNewNode(m MNode, block int64) bool {
+	if n.Summary.BalanceIndexed(m.Fund) < consensus.GetStackRequired(block+1) || m.Validations != 0 || m.Total != 0 {
+		return false
+	}
 	n.mn.mu.Lock()
-	list := append([]MNode(nil), n.mn.list...)
-	n.mn.mu.Unlock()
-	for _, e := range list {
-		if m.IP == e.IP || m.Sign == e.Sign || m.Fund == e.Fund ||
-			n.Summary.BalanceIndexed(m.Fund) < consensus.GetStackRequired(block+1) ||
-			m.Validations != 0 {
+	defer n.mn.mu.Unlock()
+	for _, e := range n.mn.list {
+		if m.IP == e.IP || m.Sign == e.Sign || m.Fund == e.Fund {
 			return false
 		}
 	}
@@ -129,6 +133,8 @@ func ParseMNode(s string) (MNode, bool) {
 		Total:       int32(codec.StrToIntDef(p(7), -1)),
 		Validations: int32(codec.StrToIntDef(p(8), -1)),
 		Hash:        codec.Truncate(p(9), 32),
+		Pub:         p(10),
+		Sig:         p(11),
 	}
 	switch {
 	case !codec.IsValidIP(m.IP):
@@ -137,18 +143,26 @@ func ParseMNode(s string) (MNode, bool) {
 	case !crypto.IsValidHashAddress(m.Sign):
 	case !crypto.IsValidHashAddress(m.Fund):
 	case m.First < 0, m.Last < 0, m.Total < 0, m.Validations < 0:
-	case m.Hash != crypto.MD5String(m.IP+codec.IntToStr(int64(m.Port))+m.Sign+m.Fund):
+	case m.Hash != crypto.IDHash(m.IP+codec.IntToStr(int64(m.Port))+m.Sign+m.Fund):
+	case crypto.GetAddressFromPublicKey(m.Pub, 0) != m.Fund:
+	case !crypto.VerifyCanonical(m.Pub, m.Sig, "MNREPORT1", mnReportFields(m)...):
 	default:
 		return m, true
 	}
 	return m, false
 }
 
+// mnReportFields are the signed fields of a report. FIX(H-01): the original
+// report carried no signature at all.
+func mnReportFields(m MNode) []string {
+	return []string{m.IP, codec.IntToStr(int64(m.Port)), m.Sign, m.Fund, codec.IntToStr(int64(m.First))}
+}
+
 // StringFromMN mirrors GetStringFromMN.
 func StringFromMN(m MNode) string {
 	i := func(v int32) string { return codec.IntToStr(int64(v)) }
 	return m.IP + " " + i(m.Port) + " " + m.Sign + " " + m.Fund + " " + i(m.First) + " " +
-		i(m.Last) + " " + i(m.Total) + " " + i(m.Validations) + " " + m.Hash
+		i(m.Last) + " " + i(m.Total) + " " + i(m.Validations) + " " + m.Hash + " " + m.Pub + " " + m.Sig
 }
 
 // CheckMNReport mirrors nosomasternodes.pas:401-444: a valid, legit report
@@ -161,7 +175,8 @@ func (n *Node) CheckMNReport(line string, block int64) string {
 	}
 	info := line[p:]
 	m, ok := ParseMNode(info)
-	if !ok || !n.IsLegitNewNode(m, block) {
+	// FIX(H-01): a report is bound to the current block.
+	if !ok || int64(m.First) != block || int64(m.Last) != block || !n.IsLegitNewNode(m, block) {
 		return ""
 	}
 	n.mn.mu.Lock()
@@ -179,12 +194,20 @@ func (n *Node) CheckMNReport(line string, block int64) string {
 	return info
 }
 
-// MNReportString mirrors GetMNReportString (nosomasternodes.pas:165-171).
+// MNReportString mirrors GetMNReportString (nosomasternodes.pas:165-171) and
+// signs it with the funds address key (FIX(H-01)). It returns "" when the
+// wallet does not hold that key.
 func (n *Node) MNReportString(block int64) string {
 	o := n.Options()
-	b := codec.IntToStr(block)
-	return o.MNIP + " " + o.MNPort + " " + o.MNSign + " " + o.MNFunds + " " + b + " " + b + " 0 0 " +
-		crypto.MD5String(o.MNIP+o.MNPort+o.MNSign+o.MNFunds)
+	w := n.Wallet.At(n.Wallet.IndexOf(o.MNFunds))
+	if o.MNFunds == "" || w.PrivateKey == "" {
+		return ""
+	}
+	port, _ := codec.StrToInt(o.MNPort)
+	m := MNode{IP: o.MNIP, Port: port, Sign: o.MNSign, Fund: o.MNFunds, First: int32(block), Last: int32(block),
+		Hash: crypto.IDHash(o.MNIP + o.MNPort + o.MNSign + o.MNFunds), Pub: w.PublicKey}
+	m.Sig = crypto.SignCanonical(w.PrivateKey, "MNREPORT1", mnReportFields(m)...)
+	return StringFromMN(m)
 }
 
 // MNsAddresses mirrors GetMNsAddresses (nosomasternodes.pas:507-528).
@@ -219,12 +242,18 @@ func (n *Node) CreditMNVerifications() {
 	defer n.mn.mu.Unlock()
 	for _, c := range n.mn.checks {
 		nodes := strings.ReplaceAll(c.ValidNodes, ":", " ")
+		seen := map[string]bool{}
 		for i := int64(0); ; i++ {
 			ip := strings.ReplaceAll(codec.Parameter(nodes, i), ";", " ")
 			ip = codec.Parameter(ip, 0)
 			if ip == "" {
 				break
 			}
+			// FIX(C-07): a validator counts at most once per masternode.
+			if seen[ip] {
+				continue
+			}
+			seen[ip] = true
 			for j := range n.mn.list {
 				if n.mn.list[j].IP == ip {
 					n.mn.list[j].Validations++
@@ -291,13 +320,32 @@ func ValidNodesInCheck(s string) int {
 	return c
 }
 
-// IsValidator mirrors nosonetwork.pas:709-713: only seed nodes validate.
-func (n *Node) IsValidator(ip string) bool { return n.IsSeedNode(ip) }
+// validatorAddress returns the sign address registered for a validator IP in
+// the ValidatorKeys option ("ip=Naddress,ip=Naddress"), or "".
+func (n *Node) validatorAddress(ip string) string {
+	for _, kv := range strings.Split(n.Options().ValidatorKeys, ",") {
+		if p := strings.SplitN(kv, "=", 2); len(p) == 2 && p[0] == ip {
+			return p[1]
+		}
+	}
+	return ""
+}
 
-// ValidateMNCheck mirrors nosonetwork.pas:716-739; the report text
-// ("$MNCHECK ...") is returned on success, "" otherwise. The code paths
-// overwrite each other like in Pascal (the last failing test wins; any
-// non-zero rejects).
+// IsValidator reports whether ip is a registered masternode verifier.
+// FIX(C-07): the original treated every seed IP as a validator
+// (nosonetwork.pas:709-713) and never tied a signing key to it.
+func (n *Node) IsValidator(ip string) bool { return n.validatorAddress(ip) != "" }
+
+// MNCheckFields are the signed fields of a masternode check.
+func MNCheckFields(c MNCheck) []string {
+	return []string{codec.IntToStr(int64(c.Block)), c.ValidatorIP, c.SignAddress, c.ValidNodes}
+}
+
+// ValidateMNCheck mirrors nosonetwork.pas:716-739. FIX(C-07): the validator
+// IP must be registered together with the sign address, the key must belong
+// to that address, and the signature covers block, validator and nodes under
+// a dedicated domain. All failures reject (the original accepted any key that
+// matched its own claimed address).
 func (n *Node) ValidateMNCheck(line string) string {
 	p := strings.IndexByte(line, '$')
 	if p < 0 {
@@ -308,9 +356,10 @@ func (n *Node) ValidateMNCheck(line string) string {
 	if n.CheckExists(c.ValidatorIP) {
 		return ""
 	}
-	bad := !n.IsValidator(c.ValidatorIP) || int64(c.Block) != n.MyLastBlock() ||
+	reg := n.validatorAddress(c.ValidatorIP)
+	bad := reg == "" || reg != c.SignAddress || int64(c.Block) != n.MyLastBlock() ||
 		crypto.GetAddressFromPublicKey(c.PubKey, 0) != c.SignAddress ||
-		!crypto.VerifySignedString(c.ValidNodes, c.Signature, c.PubKey)
+		!crypto.VerifyCanonical(c.PubKey, c.Signature, "MNCHECK1", MNCheckFields(c)...)
 	if bad {
 		return ""
 	}
@@ -409,11 +458,27 @@ func (n *Node) IsAllSynced() int {
 	return r
 }
 
-// VerificationLine mirrors GetVerificationMNLine (nosonetwork.pas:522-530).
-func (n *Node) VerificationLine(toIP string) string {
-	if n.IsAllSynced() == 0 {
-		o := n.Options()
-		return "True " + n.SyncTus() + " " + o.MNFunds + " " + toIP + " " + o.MNSign
+// VerificationLine answers an MNVER challenge. FIX(M-05): the answer is
+// signed with the Sign key over the verifier's random nonce, so only a node
+// that controls that key (and is synced) can produce it; the original
+// returned an unauthenticated text (nosonetwork.pas:522-530).
+func (n *Node) VerificationLine(nonce string) string {
+	o := n.Options()
+	w := n.Wallet.At(n.Wallet.IndexOf(o.MNSign))
+	if len(nonce) < 8 || len(nonce) > 64 || w.PrivateKey == "" || n.IsAllSynced() != 0 {
+		return "False"
 	}
-	return "False"
+	st := n.SyncTus()
+	sig := crypto.SignCanonical(w.PrivateKey, "MNVER1", nonce, st, o.MNFunds)
+	return "True " + st + " " + o.MNFunds + " " + o.MNSign + " " + w.PublicKey + " " + sig
+}
+
+// CheckVerificationLine validates an MNVER answer for the masternode m.
+func CheckVerificationLine(line, nonce, synctus string, m MNode) bool {
+	p := func(i int64) string { return codec.Parameter(line, i) }
+	if p(0) != "True" || p(1) != synctus || p(2) != m.Fund || p(3) != m.Sign {
+		return false
+	}
+	return crypto.GetAddressFromPublicKey(p(4), 0) == m.Sign &&
+		crypto.VerifyCanonical(p(4), p(5), "MNVER1", nonce, synctus, m.Fund)
 }

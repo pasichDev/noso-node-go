@@ -101,7 +101,7 @@ func sortStrings(a []string) {
 func (d *Dispatcher) exec(line string) {
 	cmd := codec.Parameter(line, 0)
 	up := strings.ToUpper(cmd)
-	if d.Echo && !strings.Contains(HideCommands, up) {
+	if d.Echo && !strings.Contains(HideCommands, up) && !Sensitive(line) {
 		d.log(">> %s", line)
 	}
 	if up == "" {
@@ -112,4 +112,15 @@ func (d *Dispatcher) exec(line string) {
 		return
 	}
 	d.log("Unknown command: %s", cmd)
+}
+
+// Sensitive reports whether a command carries or prints key material. Such
+// commands are never echoed or logged. FIX(H-10): the original logged every
+// command and the output of showkeys to its console log and crash report.
+func Sensitive(line string) bool {
+	switch strings.ToUpper(codec.Parameter(line, 0)) {
+	case "SHOWKEYS", "EXPKEYS", "NEWFROMKEYS", "SIGNCFG", "DIRECTIVE":
+		return true
+	}
+	return false
 }

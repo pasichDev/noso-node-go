@@ -280,7 +280,7 @@ func (e *Engine) ProcessPing(line string, i int, reply bool) {
 	p.GVTsHash = codec.Truncate(g(17), 32)
 	p.CFGHash = codec.Truncate(g(18), 32)
 	p.PSOHash = codec.Truncate(g(19), 32)
-	p.MerkleHash = crypto.MD5String(p.LastBlock + codec.Copy(p.ResumenHash, 0, 5) + codec.Copy(p.MNsHash, 0, 5) +
+	p.MerkleHash = crypto.IDHash(p.LastBlock + codec.Copy(p.ResumenHash, 0, 5) + codec.Copy(p.MNsHash, 0, 5) +
 		codec.Copy(p.LastBlockHash, 0, 5) + codec.Copy(p.SumarioHash, 0, 5) +
 		codec.Copy(p.GVTsHash, 0, 5) + codec.Copy(p.CFGHash, 0, 5))
 	e.peers.set(i, p)

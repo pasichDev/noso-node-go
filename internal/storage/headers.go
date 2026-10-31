@@ -25,7 +25,7 @@ func OpenHeaders(path string) *Headers {
 	if !Exists(path) {
 		_ = os.WriteFile(path, nil, 0o644)
 	}
-	h.hash = crypto.MD5File(path)
+	h.hash = crypto.IDHashFile(path)
 	return h
 }
 
@@ -35,7 +35,7 @@ func (h *Headers) Path() string { return h.path }
 // SetHash recomputes the cached MD5 (SetResumenHash).
 func (h *Headers) SetHash() {
 	h.mu.Lock()
-	h.hash = crypto.MD5File(h.path)
+	h.hash = crypto.IDHashFile(h.path)
 	h.mu.Unlock()
 }
 

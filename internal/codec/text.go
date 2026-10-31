@@ -74,27 +74,46 @@ func ExtractMNsText(s string) string {
 	return s[p+1:]
 }
 
-// IsValidIP mirrors nosogeneral.pas:194-210 including its leniency:
-// numeric fields use Val syntax and any number of trailing octets is
-// ignored; 192.168.x.x and 127.0.x.x are rejected.
+// IsValidIP accepts only a public unicast IPv4 address written as exactly
+// four decimal parts. FIX(L-02): the original (nosogeneral.pas:194-210)
+// accepted forms such as "1.2.3.4.5", "0x7f.0.0.1", and every private,
+// loopback, link-local, multicast and reserved range except 192.168/16 and
+// 127.0/16.
 func IsValidIP(ip string) bool {
-	v := [4]int64{}
-	for i := range v {
-		v[i] = StrToIntDef(Parameter(ip, int64(i), '.'), -1)
+	parts := strings.Split(ip, ".")
+	if len(parts) != 4 {
+		return false
 	}
-	ok := true
-	for _, x := range v {
-		if x < 0 || x > 255 {
-			ok = false
+	var v [4]int
+	for i, p := range parts {
+		if p == "" || len(p) > 3 {
+			return false
 		}
+		n := 0
+		for _, c := range []byte(p) {
+			if c < '0' || c > '9' {
+				return false
+			}
+			n = n*10 + int(c-'0')
+		}
+		if n > 255 || (len(p) > 1 && p[0] == '0') {
+			return false
+		}
+		v[i] = n
 	}
-	if v[0] == 192 && v[1] == 168 {
-		ok = false
+	switch {
+	case v[0] == 0, v[0] == 10, v[0] == 127, v[0] >= 224:
+		return false
+	case v[0] == 100 && v[1] >= 64 && v[1] <= 127: // CGNAT
+		return false
+	case v[0] == 169 && v[1] == 254, v[0] == 172 && v[1] >= 16 && v[1] <= 31, v[0] == 192 && v[1] == 168:
+		return false
+	case v[0] == 192 && v[1] == 0 && v[2] == 0, v[0] == 192 && v[1] == 0 && v[2] == 2,
+		v[0] == 198 && (v[1] == 18 || v[1] == 19), v[0] == 198 && v[1] == 51 && v[2] == 100,
+		v[0] == 203 && v[1] == 0 && v[2] == 113:
+		return false
 	}
-	if v[0] == 127 && v[1] == 0 {
-		ok = false
-	}
-	return ok
+	return true
 }
 
 // Copy mirrors the Pascal copy(s, idx, count) on 1-based indexes, clamped

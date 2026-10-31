@@ -57,7 +57,7 @@ func OpenCFG(path string, now func() int64, fetch func() string) *CFG {
 }
 
 func (c *CFG) setHash() {
-	c.hash = crypto.MD5String(c.data)
+	c.hash = crypto.IDHash(c.data)
 }
 
 // Hash returns MyCFGHash.

@@ -51,13 +51,16 @@ func TestStrToInt(t *testing.T) {
 	}
 }
 
+// FIX(L-02): see codec.IsValidIP.
 func TestIsValidIP(t *testing.T) {
 	for ip, want := range map[string]bool{
-		"204.10.194.22": true, "192.168.1.1": false, "127.0.0.1": false,
-		"256.1.1.1": false, "1.2.3": false, "1.2.3.4.5": true,
+		"204.10.194.22": true, "38.242.252.153": true, "192.168.1.1": false, "127.0.0.1": false,
+		"10.1.2.3": false, "172.16.0.1": false, "169.254.1.1": false, "224.0.0.1": false, "0.1.2.3": false,
+		"256.1.1.1": false, "1.2.3": false, "1.2.3.4.5": false, "0x7f.0.0.1": false, "01.2.3.4": false,
+		"1.2.3.": false, " 1.2.3.4": false,
 	} {
 		if IsValidIP(ip) != want {
-			t.Errorf("IsValidIP(%q)", ip)
+			t.Errorf("IsValidIP(%q) want %v", ip, want)
 		}
 	}
 }

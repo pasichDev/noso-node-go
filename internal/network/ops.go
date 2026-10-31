@@ -56,11 +56,15 @@ func (e *Engine) SendFunds(line string, say Printer, startIdx int) string {
 			dest = rec.Hash
 		}
 	}
+	if ok && !node.ValidReceiver(dest) { // FIX(L-01, L-08)
+		say.say("Invalid destination.")
+		ok = false
+	}
 	monto := codec.StrToInt64Def(amount, -1)
 	if reference == "" {
 		reference = "null"
 	}
-	if monto <= 10 {
+	if monto <= 10 || monto > consensus.MaxSupply { // FIX(C-05)
 		say.say("Invalid ammount.")
 		ok = false
 	}
@@ -162,16 +166,16 @@ func (e *Engine) SendGVT(line string, say Printer) string {
 		say.say("Can not transfer GVT to same address")
 		return ""
 	}
-	ot := n.UTCTimeStr()
-	trfr := crypto.GetTransferHash(ot + g.Owner + dest)
-	orderHash := crypto.GetOrderHash("1" + ot + trfr)
-	sig := crypto.GetStringSigned("Transfer GVT "+g.Number+" "+dest+ot, n.Wallet.At(n.Wallet.IndexOf(g.Owner)).PrivateKey)
 	w := n.Wallet.At(n.Wallet.IndexOf(g.Owner))
-	res := e.ProtocolLine(21) + orderHash + " 1 SNDGVT " + ot + " " + g.Number + " 1 " + w.PublicKey + " " +
-		w.Hash + " " + dest + " " + codec.IntToStr(consensus.GetCustFee(n.MyLastBlock())) + " 0 " + sig + " " + trfr
-	e.OutgoingAdd(res)
-	say.say("GVT %s transfered from %s to %s\nOrder: %s", g.Number, w.Hash, dest, orderHash)
-	return orderHash
+	ts, _ := codec.StrToInt64(n.UTCTimeStr())
+	o := types.Order{OrderLines: 1, OrderType: "SNDGVT", TimeStamp: ts, Reference: g.Number, TrxLine: 1,
+		Sender: w.PublicKey, Address: w.Hash, Receiver: dest, AmmountFee: consensus.GetCustFee(n.MyLastBlock())}
+	node.SignOrder(&o, w.PrivateKey)
+	o.OrderID = node.SingleOrderID(o.TrfrID)
+	o.Normalize()
+	e.OutgoingAdd(e.ProtocolLine(0) + "$" + types.StringFromOrder(o))
+	say.say("GVT %s transfered from %s to %s\nOrder: %s", g.Number, w.Hash, dest, o.OrderID)
+	return o.OrderID
 }
 
 // Customize mirrors CustomizeAddress (mpparser.pas:~640-720) combined with
@@ -216,15 +220,16 @@ func (e *Engine) Customize(line string, say Printer) bool {
 			ok = false
 		}
 	}
-	if !ok {
+	if !ok || !node.ValidAlias(alias) {
 		return false
 	}
-	cur := n.UTCTimeStr()
-	trfr := crypto.GetTransferHash(cur + addr + alias)
-	orderHash := crypto.GetOrderHash("1" + cur + trfr)
-	sig := crypto.GetStringSigned("Customize this "+addr+" "+alias, w.PrivateKey)
-	e.OutgoingAdd(e.ProtocolLine(9) + orderHash + " 1 CUSTOM " + cur + " null 1 " + w.PublicKey + " " + w.Hash +
-		" " + alias + " " + codec.IntToStr(consensus.GetCustFee(n.MyLastBlock())) + " 0 " + sig + " " + trfr)
+	ts, _ := codec.StrToInt64(n.UTCTimeStr())
+	o := types.Order{OrderLines: 1, OrderType: "CUSTOM", TimeStamp: ts, Reference: "null", TrxLine: 1,
+		Sender: w.PublicKey, Address: w.Hash, Receiver: alias, AmmountFee: consensus.GetCustFee(n.MyLastBlock())}
+	node.SignOrder(&o, w.PrivateKey)
+	o.OrderID = node.SingleOrderID(o.TrfrID)
+	o.Normalize()
+	e.OutgoingAdd(e.ProtocolLine(0) + "$" + types.StringFromOrder(o))
 	say.say("Customization sent")
 	return true
 }

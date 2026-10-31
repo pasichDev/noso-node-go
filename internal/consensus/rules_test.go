@@ -29,20 +29,30 @@ func TestBlockRewardBoundaries(t *testing.T) {
 	}
 }
 
+// FIX(L-06): supply follows the real halving schedule.
 func TestSupply(t *testing.T) {
-	// nosogeneral.pas:216-217: block*5e9 + 1030390730000.
 	if GetSupply(0) != 1030390730000 || GetSupply(100) != 100*5000000000+1030390730000 {
 		t.Error("supply low")
 	}
-	// Continuity at the 210000 switch: 209999*5e9 + (210000-209999)*5e9 + premine
-	if GetSupply(210000) != 210000*5000000000+1030390730000 {
-		t.Error("supply at 210000")
+	if GetSupply(209999) != 209999*5000000000+1030390730000 || GetSupply(210000) != 209999*5000000000+2500000000+1030390730000 {
+		t.Error("supply around the first halving")
 	}
-	if GetSupply(209999) != 209999*5000000000+1030390730000 {
-		t.Error("supply at 209999")
+	// independent summation
+	var sum int64 = 1030390730000
+	for b := int64(1); b <= 450000; b++ {
+		sum += GetBlockReward(b)
 	}
-	if GetSupply(420000) != 0 {
-		t.Error("COMPAT: supply is 0 from block 420000")
+	if GetSupply(450000) != sum {
+		t.Errorf("%d != %d", GetSupply(450000), sum)
+	}
+	if GetSupply(420000) == 0 || GetSupply(2310000) != GetSupply(5000000) {
+		t.Error("supply after 420000 / end of rewards")
+	}
+	if _, ok := CheckedAdd(MaxSupply, 1<<62); ok {
+		t.Error("overflow accepted")
+	}
+	if _, ok := CheckedAdd(-1, 5); ok {
+		t.Error("negative accepted")
 	}
 }
 

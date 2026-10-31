@@ -99,10 +99,13 @@ func TestOrderStringRoundTrip(t *testing.T) {
 	if !ok || got != o {
 		t.Fatalf("%v %+v", ok, got)
 	}
-	// ShortString truncation of the type (COMPAT, nosogeneral.pas:30).
-	got, _ = ParseOrder("X id 1 TRFRXXX 5 null 1 s a r 0 0 sig t")
-	if got.OrderType != "TRFRXX" {
-		t.Fatal(got.OrderType)
+	// FIX(L-08): over-long fields are rejected instead of truncated.
+	if _, ok := ParseOrder("X id 1 TRFRXXX 5 null 1 s a r 0 0 sig t"); ok {
+		t.Fatal("over-long order type accepted")
+	}
+	long := "N" + strings.Repeat("a", 45)
+	if _, ok := ParseOrder("X id 1 TRFR 5 null 1 s a " + long + " 0 0 sig t"); ok {
+		t.Fatal("over-long receiver accepted")
 	}
 	if _, ok := ParseOrder("X id one TRFR 5 null 1 s a r 0 0 sig t"); ok {
 		t.Fatal("bad int must fail")

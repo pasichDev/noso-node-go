@@ -46,7 +46,7 @@ type ConsensusStats struct {
 // GetConHash mirrors nosoconsensus.pas:215-221.
 func GetConHash(line string) string {
 	p := func(n int64) string { return codec.Parameter(line, n) }
-	return crypto.MD5String(p(2) + codec.Copy(p(5), 0, 5) + codec.Copy(p(8), 0, 5) +
+	return crypto.IDHash(p(2) + codec.Copy(p(5), 0, 5) + codec.Copy(p(8), 0, 5) +
 		codec.Copy(p(10), 0, 5) + codec.Copy(p(17), 0, 5) + codec.Copy(p(18), 0, 5) +
 		codec.Copy(p(19), 0, 5))
 }
@@ -74,17 +74,69 @@ func (e *Engine) ConsensusItems() []string {
 func (e *Engine) SetNodesArray(list string) {
 	list = codec.Trim(strings.ReplaceAll(list, ":", " "))
 	var arr []nodeConsensus
+	seen := map[string]bool{}
 	if list != "" {
 		for _, item := range strings.Split(list, " ") {
 			item = strings.ReplaceAll(item, ";", " ")
-			arr = append(arr, nodeConsensus{host: codec.Parameter(item, 0),
-				port: int(codec.StrToIntDef(codec.Parameter(item, 1), 8080))})
+			nc := nodeConsensus{host: codec.Parameter(item, 0), port: int(codec.StrToIntDef(codec.Parameter(item, 1), 8080))}
+			// FIX(H-04): a seed listed twice counted twice in the vote
+			// (the default list repeats an address).
+			if k := nc.host + ":" + codec.IntToStr(int64(nc.port)); !seen[k] && nc.host != "" {
+				seen[k] = true
+				arr = append(arr, nc)
+			}
 		}
 	}
 	e.consMu.Lock()
 	e.nodesArr = arr
-	e.consMu.Unlock()
 	e.lastConsensusTime = 0
+	e.consMu.Unlock()
+}
+
+// seedKey returns the configured status-signing key of a seed host.
+func (e *Engine) seedKey(host string) string {
+	for _, kv := range strings.Split(e.N.Options().SeedKeys, ",") {
+		if p := strings.SplitN(kv, "=", 2); len(p) == 2 && p[0] == host {
+			return p[1]
+		}
+	}
+	return ""
+}
+
+// checkSignedStatus verifies the SIG suffix of a seed's status reply when a
+// key is configured for that seed, and returns the line without it.
+// FIX(H-04): status replies were plain text from an unauthenticated socket.
+func (e *Engine) checkSignedStatus(host, line string) (string, bool) {
+	key := e.seedKey(host)
+	i := strings.LastIndex(line, " SIG:")
+	if key == "" {
+		if i >= 0 {
+			line = line[:i]
+		}
+		return line, true
+	}
+	if i < 0 {
+		return "", false
+	}
+	body, sig := line[:i], line[i+5:]
+	if !crypto.VerifyCanonical(key, sig, "STATUS1", body) {
+		return "", false
+	}
+	if d := e.N.UTCTime() - codec.StrToInt64Def(codec.Parameter(body, 7), 0); d > 60 || d < -60 {
+		return "", false // replayed or stale
+	}
+	return body, true
+}
+
+// SignedStatus returns the status line with a signature when this node holds
+// a sign key.
+func (e *Engine) SignedStatus() string {
+	body := "NODESTATUS " + e.NodeStatusString()
+	o := e.N.Options()
+	if w := e.N.Wallet.At(e.N.Wallet.IndexOf(o.MNSign)); o.MNSign != "" && w.PrivateKey != "" {
+		return body + " SIG:" + crypto.SignCanonical(w.PrivateKey, "STATUS1", body)
+	}
+	return body
 }
 
 // RequestLine mirrors RequestLineToPeer: connect, send one line, read one
@@ -121,7 +173,8 @@ func (e *Engine) CalculateConsensus() []string {
 		go func(i int) {
 			defer wg.Done()
 			line := e.RequestLine(nodes[i].host, nodes[i].port, "NODESTATUS")
-			if codec.Copy(line, 1, 10) == "NODESTATUS" {
+			var sigOK bool
+			if line, sigOK = e.checkSignedStatus(nodes[i].host, line); sigOK && codec.Copy(line, 1, 10) == "NODESTATUS" {
 				h := GetConHash(line)
 				line = strings.ReplaceAll(line, "NODESTATUS", h)
 				nodes[i].data = line
@@ -148,6 +201,7 @@ func (e *Engine) CalculateConsensus() []string {
 		v string
 		c int
 	}
+	topCount := 0
 	highest := func(arr []kv) string {
 		max, idx := 0, 0
 		for i, a := range arr {
@@ -158,6 +212,7 @@ func (e *Engine) CalculateConsensus() []string {
 		if len(arr) == 0 {
 			return ""
 		}
+		topCount = max
 		return arr[idx].v
 	}
 	add := func(arr []kv, v string) []kv {
@@ -177,13 +232,18 @@ func (e *Engine) CalculateConsensus() []string {
 	}
 	conHash := highest(arr)
 	stats := ConsensusStats{TotalNodes: len(nodes), ReachedNodes: reachedN}
+	// FIX(H-04): the winner needs more than half of ALL configured seeds, not
+	// just a plurality of the ones that answered (nosoconsensus.pas:351-357).
+	if topCount*2 <= len(nodes) {
+		conHash = ""
+	}
 	if conHash == "" {
 		res := make([]string, len(NConsensus))
 		e.consMu.Lock()
 		e.cons = res
 		e.ConsStats = stats
-		e.consMu.Unlock()
 		e.lastConsensusTime -= 50
+		e.consMu.Unlock()
 		return res
 	}
 	result := []string{conHash}

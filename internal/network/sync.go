@@ -135,6 +135,10 @@ func (e *Engine) SyncWithMainnet() {
 	consLB := codec.StrToIntDef(e.GetConsensus(CLastBlock), -1)
 	if n.MyLastBlock() > consLB && consLB >= 0 {
 		removed := n.RemoveBlocks(consLB)
+		if removed < 0 { // FIX(H-04): refuse a deep rollback on the word of peers
+			e.logf("console", "consensus is far behind our chain; refusing to delete blocks")
+			return
+		}
 		e.logf("console", codec.IntToStr(int64(removed))+" blocks deleted")
 		n.UndoLastBlock()
 		return
@@ -145,7 +149,7 @@ func (e *Engine) SyncWithMainnet() {
 	if e.GetConsensus(CCFGHash) != codec.Copy(n.CFG.Hash(), 0, 5) && n.CFG.LastRequest+5 < now &&
 		e.GetConsensus(CCFGHash) != "" {
 		if s, ok := e.ValidSlotForSeed(); ok {
-			e.PTCSendLine(s, e.ProtocolLine(30))
+			e.request(s, 30, "CFG")
 			n.CFG.LastRequest = now
 			e.logf("console", "Noso CFG file requested")
 		}
@@ -153,22 +157,21 @@ func (e *Engine) SyncWithMainnet() {
 	if e.GetConsensus(CMNsHash) != codec.Copy(n.MNFile.Hash(), 1, 5) && e.lastTimeMNHashRequested+5 < now &&
 		e.GetConsensus(CMNsHash) != "" {
 		if s, ok := e.ValidSlotForSeed(); ok {
-			e.PTCSendLine(s, e.ProtocolLine(16))
+			e.request(s, 16, "MNFILE")
 			e.lastTimeMNHashRequested = now
 			e.logf("console", "Mns File requested to "+e.peers.get(s).IP)
 		}
 	}
 	// headers
 	if codec.Copy(n.Headers.Hash(), 0, 5) != e.GetConsensus(CHeaders) {
-		n.ClearPending()
-		n.ClearMNsChecks()
-		n.ClearMNsList()
+		// FIX(H-05): a headers mismatch alone no longer wipes the pool and
+		// the masternode tables (mpred.pas:639-641).
 		if e.lastTimeRequestResumen+10 < now && !e.downloadHeaders {
 			if s, ok := e.ValidSlotForSeed(); ok {
 				if nlbv-myLast >= 144 || e.forceCompleteHeadersDownload {
-					e.PTCSendLine(s, e.ProtocolLine(7))
+					e.request(s, 7, "RESUMEN")
 				} else {
-					e.PTCSendLine(s, e.ProtocolLine(18))
+					e.request(s, 18, "HEADUPD")
 				}
 				e.lastTimeRequestResumen = now
 			}
@@ -181,7 +184,7 @@ func (e *Engine) SyncWithMainnet() {
 		n.ClearMNsList()
 		if e.lastTimeRequestBlock+5 < now && !e.downloadBlocks {
 			if s, ok := e.ValidSlotForSeed(); ok {
-				e.PTCSendLine(s, e.ProtocolLine(8))
+				e.request(s, 8, "BLOCKS")
 				e.lastTimeRequestBlock = now
 			}
 		}
@@ -192,7 +195,7 @@ func (e *Engine) SyncWithMainnet() {
 		if n.Summary.LastOp()+2*consensus.SumMarkInterval < myLast {
 			if e.lastTimeRequestSumary+5 < now && !e.downloadSumary {
 				if s, ok := e.ValidSlotForSeed(); ok {
-					e.PTCSendLine(s, e.ProtocolLine(6))
+					e.request(s, 6, "SUMARY")
 					e.lastTimeRequestSumary = now
 				}
 			}
@@ -206,7 +209,7 @@ func (e *Engine) SyncWithMainnet() {
 	if e.GetConsensus(CGVTsHash) != codec.Copy(n.GVTs.Hash(), 0, 5) && e.lastTimeGVTsRequest+5 < now &&
 		e.GetConsensus(CGVTsHash) != "" && !e.downloadGVTs {
 		if s, ok := e.ValidSlotForSeed(); ok {
-			e.PTCSendLine(s, e.ProtocolLine(20))
+			e.request(s, 20, "GVTS")
 			e.lastTimeGVTsRequest = now
 		}
 	}
@@ -214,7 +217,7 @@ func (e *Engine) SyncWithMainnet() {
 	if e.GetConsensus(20) != codec.Copy(n.PSOs.FileHash(), 0, 5) && e.lastTimePSOsRequest+5 < now &&
 		e.GetConsensus(20) != "" && !e.downloadPSOs {
 		if s, ok := e.ValidSlotForSeed(); ok {
-			e.PTCSendLine(s, e.ProtocolLine(32))
+			e.request(s, 32, "PSOS")
 			e.lastTimePSOsRequest = now
 		}
 	}
@@ -242,7 +245,7 @@ func (e *Engine) SyncWithMainnet() {
 	case codec.Copy(n.Headers.Hash(), 0, 5) == e.GetConsensus(CHeaders) && myLast == nlbv &&
 		sumPrefix != e.GetConsensus(CSumHash) && n.Summary.LastOp() == myLast && e.lastTimeRequestSumary+5 < now:
 		if s, ok := e.ValidSlotForSeed(); ok {
-			e.PTCSendLine(s, e.ProtocolLine(6))
+			e.request(s, 6, "SUMARY")
 			e.lastTimeRequestSumary = now
 		}
 	case myLast == nlbv && (codec.Copy(n.Headers.Hash(), 0, 5) != e.GetConsensus(CHeaders) ||
@@ -252,7 +255,7 @@ func (e *Engine) SyncWithMainnet() {
 		n.MyLastBlockHash() == e.GetConsensus(CLBHash) && sumPrefix == e.GetConsensus(CSumHash) && !e.downloadHeaders:
 		if s, ok := e.ValidSlotForSeed(); ok {
 			n.ClearPending()
-			e.PTCSendLine(s, e.ProtocolLine(7))
+			e.request(s, 7, "RESUMEN")
 			e.lastTimeRequestResumen = now
 		}
 	}

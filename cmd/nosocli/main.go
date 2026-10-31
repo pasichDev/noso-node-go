@@ -20,6 +20,8 @@ func main() {
 	data := flag.String("data", "NOSODATA", "data directory")
 	list := flag.Bool("list", false, "list the supported commands")
 	echo := flag.Bool("echo", false, "echo the command before running it")
+	passFile := flag.String("wallet-pass-file", "", "file holding the wallet passphrase (or NOSO_WALLET_PASSPHRASE)")
+	plain := flag.Bool("insecure-plain-wallet", false, "open a clear-text wallet.pkw")
 	flag.Parse()
 	if *list {
 		for _, c := range cli.Commands() {
@@ -31,7 +33,12 @@ func main() {
 		if err := control.Call(control.SocketPath(*data), line, os.Stdout); err == nil {
 			return
 		}
-		n, err := node.New(*data, nil)
+		pass := []byte(os.Getenv("NOSO_WALLET_PASSPHRASE"))
+		if *passFile != "" {
+			b, _ := os.ReadFile(*passFile)
+			pass = []byte(strings.TrimRight(string(b), "\r\n"))
+		}
+		n, err := node.NewWithConfig(*data, node.Config{WalletPassphrase: pass, InsecurePlainWallet: *plain})
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "cannot open data directory:", err)
 			os.Exit(1)

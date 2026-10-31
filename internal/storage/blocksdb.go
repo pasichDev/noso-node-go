@@ -32,7 +32,7 @@ func OpenBlocksDB(path string) *BlocksDB {
 // B16ToB58 (signed quirk included), characters 2..7 read as Base58 and
 // reduced modulo 100000.
 func DBIndex(text string) int32 {
-	t := crypto.B16ToB58(crypto.MD5String(text))
+	t := crypto.B16ToB58(crypto.IDHash(text))
 	sub := codec.Copy(t, 2, 6)
 	v, _ := codec.StrToInt64(crypto.B58ToB10(sub))
 	return int32(v % 100000)

@@ -2,7 +2,6 @@ package crypto
 
 import (
 	"crypto/rand"
-	"crypto/sha1" //nolint:gosec // SHA-1 is mandated by the Noso signature scheme.
 	"encoding/asn1"
 	"math/big"
 )
@@ -136,14 +135,17 @@ func encodePoint(p point) []byte {
 
 type ecdsaSig struct{ R, S *big.Int }
 
-// ecdsaSignSHA1 signs SHA-1(msg) with private scalar d (random k, like
-// BouncyCastle's default ECDSASigner) and returns the DER encoding.
-func ecdsaSignSHA1(msg []byte, d *big.Int) ([]byte, bool) {
+var secpHalfN = new(big.Int).Rsh(secpN, 1)
+
+// ecdsaSignDigest signs a 32 byte digest with private scalar d and returns
+// the DER encoding. FIX(M-13): the S value is normalised to the low half of
+// the group order, so a signature cannot be re-encoded into a second valid
+// one (nosocrypto.pas:217-228 used SHA-1 and accepted either S).
+func ecdsaSignDigest(h []byte, d *big.Int) ([]byte, bool) {
 	if d.Sign() <= 0 || d.Cmp(secpN) >= 0 {
 		return nil, false
 	}
-	h := sha1.Sum(msg) //nolint:gosec
-	e := new(big.Int).SetBytes(h[:])
+	e := new(big.Int).SetBytes(h)
 	for {
 		k, err := rand.Int(rand.Reader, secpN)
 		if err != nil {
@@ -164,6 +166,9 @@ func ecdsaSignSHA1(msg []byte, d *big.Int) ([]byte, bool) {
 		if s.Sign() == 0 {
 			continue
 		}
+		if s.Cmp(secpHalfN) > 0 {
+			s.Sub(secpN, s)
+		}
 		der, err := asn1.Marshal(ecdsaSig{r, s})
 		if err != nil {
 			return nil, false
@@ -172,9 +177,9 @@ func ecdsaSignSHA1(msg []byte, d *big.Int) ([]byte, bool) {
 	}
 }
 
-// ecdsaVerifySHA1 verifies a DER signature over SHA-1(msg). High-S values
-// are accepted (BouncyCastle does not normalise).
-func ecdsaVerifySHA1(msg, der []byte, pub point) bool {
+// ecdsaVerifyDigest verifies a DER signature over a 32 byte digest and
+// rejects high-S values (FIX(M-13)).
+func ecdsaVerifyDigest(h, der []byte, pub point) bool {
 	var sg ecdsaSig
 	rest, err := asn1.Unmarshal(der, &sg)
 	if err != nil || len(rest) != 0 || sg.R == nil || sg.S == nil {
@@ -183,8 +188,10 @@ func ecdsaVerifySHA1(msg, der []byte, pub point) bool {
 	if sg.R.Sign() < 1 || sg.S.Sign() < 1 || sg.R.Cmp(secpN) >= 0 || sg.S.Cmp(secpN) >= 0 {
 		return false
 	}
-	h := sha1.Sum(msg) //nolint:gosec
-	e := new(big.Int).SetBytes(h[:])
+	if sg.S.Cmp(secpHalfN) > 0 {
+		return false
+	}
+	e := new(big.Int).SetBytes(h)
 	c := modInv(sg.S, secpN)
 	u1 := new(big.Int).Mul(e, c)
 	u1.Mod(u1, secpN)

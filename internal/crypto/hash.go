@@ -1,21 +1,18 @@
 // Package crypto implements the hashing, base conversion, key and address
-// primitives of the Noso protocol, byte-compatible with nosocrypto.pas and
-// mpsignerutils.pas of the Pascal node.
-//
-// All "string" arguments are treated as raw byte strings, exactly like the
-// Pascal AnsiString values they mirror.
+// primitives of the Noso protocol. Identity formats of addresses are those
+// of nosocrypto.pas; signatures, file identities and certificates were
+// replaced as described in docs/compatibility.md.
 package crypto
 
 import (
-	"crypto/md5"
+	"crypto/md5" //nolint:gosec // only for the md5 console command
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
 	"strings"
 )
 
-// SHA256String mirrors HashSha256String (nosocrypto.pas:177-180). HashLib's
-// ToString yields upper-case hex.
+// SHA256String mirrors HashSha256String (nosocrypto.pas:177-180): upper-case hex.
 func SHA256String(s string) string {
 	h := sha256.Sum256([]byte(s))
 	return strings.ToUpper(hex.EncodeToString(h[:]))
@@ -28,28 +25,34 @@ func RIPEMD160String(s string) string {
 	return strings.ToUpper(hex.EncodeToString(h[:]))
 }
 
-// MD5String mirrors HashMD5String (nosocrypto.pas:189-192): upper-case hex.
-func MD5String(s string) string {
-	h := md5.Sum([]byte(s))
+// MD5Hex returns the real MD5, kept for the `md5` console command only.
+func MD5Hex(s string) string {
+	h := md5.Sum([]byte(s)) //nolint:gosec
 	return strings.ToUpper(hex.EncodeToString(h[:]))
 }
 
-// MD5OfEmpty is returned by HashMD5File when the file cannot be read
-// (nosocrypto.pas:197).
-const MD5OfEmpty = "D41D8CD98F00B204E9800998ECF8427E"
+// IDHash is the identity hash of files, blocks and state: the first 32 hex
+// characters (128 bits) of SHA-256, upper case. FIX(M-13): the original used
+// MD5 (nosocrypto.pas:189-202) for the same purpose; 32 characters keep the
+// ShortString[32] header fields unchanged.
+func IDHash(s string) string { return IDHashBytes([]byte(s)) }
 
-// MD5File mirrors HashMD5File (nosocrypto.pas:195-202). Unreadable file
-// yields the MD5 of the empty string.
-func MD5File(path string) string {
+// IDHashBytes is IDHash for raw bytes.
+func IDHashBytes(b []byte) string {
+	h := sha256.Sum256(b)
+	return strings.ToUpper(hex.EncodeToString(h[:16]))
+}
+
+// IDHashOfEmpty is the hash of no bytes, returned for unreadable files like
+// HashMD5File's fallback (nosocrypto.pas:197).
+var IDHashOfEmpty = IDHashBytes(nil)
+
+// IDHashFile is IDHash of a file's content; an unreadable file yields
+// IDHashOfEmpty.
+func IDHashFile(path string) string {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return MD5OfEmpty
+		return IDHashOfEmpty
 	}
-	return MD5Bytes(b)
-}
-
-// MD5Bytes returns the upper-case hex MD5 of raw bytes.
-func MD5Bytes(b []byte) string {
-	h := md5.Sum(b)
-	return strings.ToUpper(hex.EncodeToString(h[:]))
+	return IDHashBytes(b)
 }

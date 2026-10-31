@@ -185,12 +185,39 @@ func (n *Node) IsAddressLocked(addr string) bool {
 	return strings.Contains(n.CFG.Param(5), addr)
 }
 
+// TrxSeenRecently reports whether an order id appears in the last three
+// blocks. FIX(C-04): the original looked only at the last block
+// (nosonetwork.pas:332-348).
+func (n *Node) TrxSeenRecently(trfrID string) bool {
+	last := n.MyLastBlock()
+	for b := last; b > last-3 && b >= 0; b-- {
+		for _, o := range n.Blocks.Orders(b) {
+			if o.TrfrID == trfrID {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // ValidateTrfr mirrors mpprotocol.pas:779-811; the first failing check
-// returns its code.
+// returns its code. FIX(C-04, C-05, H-07, L-01): amounts are range and
+// overflow checked, the signature covers every field, the TrfrID must be
+// derived from the signed data and be unseen, and the receiver must be a
+// regular address.
 func (n *Node) ValidateTrfr(o types.Order, origen string) int {
 	last := n.LastBlockData()
+	total, sumOK := consensus.CheckedAdd(o.AmmountFee, o.AmmountTrf)
 	switch {
-	case n.Summary.BalanceIndexed(origen)-n.AddressPendingPays(origen) < o.AmmountFee+o.AmmountTrf:
+	case o.AmmountTrf < 0:
+		return 7
+	case o.AmmountFee < 0:
+		return 8
+	case !sumOK:
+		return 15
+	case o.OrderType != "TRFR":
+		return 16
+	case n.Summary.BalanceIndexed(origen)-n.AddressPendingPays(origen) < total:
 		return 1
 	case n.TranxAlreadyPending(o.TrfrID):
 		return 2
@@ -198,18 +225,11 @@ func (n *Node) ValidateTrfr(o types.Order, origen string) int {
 		return 3
 	case o.TimeStamp > last.TimeEnd+600:
 		return 4
-	case n.TrxExistsInLastBlock(o.TrfrID):
+	case n.TrxSeenRecently(o.TrfrID):
 		return 5
-	case !crypto.VerifySignedString(codec.IntToStr(o.TimeStamp)+origen+o.Receiver+codec.IntToStr(o.AmmountTrf)+
-		codec.IntToStr(o.AmmountFee)+codec.IntToStr(int64(o.TrxLine)), o.Signature, o.Sender):
-		return 6
-	case o.AmmountTrf < 0:
-		return 7
-	case o.AmmountFee < 0:
-		return 8
 	case !crypto.IsValidHashAddress(origen):
 		return 9
-	case o.OrderType == "TRFR" && !crypto.IsValidHashAddress(o.Receiver):
+	case !ValidReceiver(o.Receiver):
 		return 10
 	case n.IsAddressLocked(o.Address):
 		return 11
@@ -218,17 +238,17 @@ func (n *Node) ValidateTrfr(o types.Order, origen string) int {
 	case origen != o.Address:
 		return 13
 	}
-	return 0
+	return VerifyOrder(o)
 }
 
 // PTCOrder mirrors PTC_Order (mpprotocol.pas:842-948). It returns the new
 // order id on success, "ERROR n" for a rejected order, or "" when the line
 // could not even be parsed.
 //
-// COMPAT: error codes of the first loop (96-99) are overwritten by the
-// validation loop, so a line can fail with an empty answer; and the
-// validation loop would index beyond the parsed array in Pascal, here it
-// is bounded (hardening, no effect on valid orders).
+// FIX(L-03): the first error code is kept (the original let the validation
+// loop overwrite codes 96-99 with 0, so a rejected order could be answered
+// with an empty string, mpprotocol.pas:917-927) and validation only runs on
+// a completely parsed line.
 func (n *Node) PTCOrder(line string) string {
 	num, ok := codec.StrToInt(codec.Parameter(line, 5))
 	if !ok {
@@ -241,10 +261,15 @@ func (n *Node) PTCOrder(line string) string {
 	textbak := codec.GetOpData(line)
 	proceder := true
 	errorCode := -1
+	setCode := func(c int) {
+		if errorCode <= 0 {
+			errorCode = c
+		}
+	}
 	var totalSent, totalFee int64
 	if numTransfers > 30 {
 		proceder = false
-		errorCode = 89
+		setCode(89)
 	}
 	var trx []types.Order
 	var senders []string
@@ -258,23 +283,23 @@ func (n *Node) PTCOrder(line string) string {
 		senders = append(senders, "")
 		if !ok {
 			proceder = false
-			errorCode = 96
+			setCode(96)
 		}
 		totalSent += o.AmmountTrf
 		totalFee += o.AmmountFee
 		genOrderID += o.TrfrID
 		if n.TranxAlreadyPending(o.TrfrID) {
 			proceder = false
-			errorCode = 98
+			setCode(98)
 		}
 		senders[cont] = crypto.GetAddressFromPublicKey(o.Sender, 0)
 		if senders[cont] != o.Address {
 			proceder = false
-			errorCode = 97
+			setCode(97)
 		}
 		if strings.Contains(sendersString, senders[cont]) {
 			proceder = false
-			errorCode = 99
+			setCode(99)
 		}
 		sendersString += senders[cont]
 		if len(textbak) >= 1 {
@@ -286,16 +311,16 @@ func (n *Node) PTCOrder(line string) string {
 	todoValido := true
 	if totalFee < consensus.GetMinimumFee(totalSent) {
 		todoValido = false
-		errorCode = 100
+		setCode(100)
 	}
 	if recOrderID != genOrderID {
 		todoValido = false
-		errorCode = 101
+		setCode(101)
 	}
-	if todoValido {
+	if todoValido && proceder {
 		for cont := 0; cont < numTransfers && cont < len(trx); cont++ {
-			errorCode = n.ValidateTrfr(trx[cont], senders[cont])
-			if errorCode > 0 {
+			if c := n.ValidateTrfr(trx[cont], senders[cont]); c > 0 {
+				setCode(c)
 				todoValido = false
 				break
 			}
@@ -327,20 +352,27 @@ func PTCHeader(n *Node) string {
 	return "PSK " + codec.IntToStr(Protocol) + " " + MainnetVersion + NodeRelease + " " + n.UTCTimeStr() + " "
 }
 
-// PTCCustom mirrors PTC_Custom (mpprotocol.pas:744-770). COMPAT: an
-// unparsable order returns 0 (success) like the Pascal `exit` after
-// `Result := 0`.
+// PTCCustom mirrors PTC_Custom (mpprotocol.pas:744-770). FIX(C-06, M-01,
+// L-03): the fee must equal the exact custom fee and no amount may move, the
+// alias rules are enforced here, the ids are derived from the signed data
+// and an unparsable order is an error (the original answered 0, success).
 func (n *Node) PTCCustom(line string) int {
 	o, ok := types.ParseOrder(line)
 	if !ok {
-		return 0
+		return 17
 	}
 	addr := crypto.GetAddressFromPublicKey(o.Sender, 0)
 	code := 0
+	if o.OrderType != "CUSTOM" {
+		code = 16
+	}
 	if addr != o.Address {
 		code = 1
 	}
-	if n.AddressAvailable(addr) < consensus.GetCustFee(n.MyLastBlock()) {
+	if o.AmmountFee != consensus.GetCustFee(n.MyLastBlock()) || o.AmmountTrf != 0 {
+		code = 9
+	}
+	if n.AddressAvailable(addr) < o.AmmountFee {
 		code = 2
 	}
 	if n.TranxAlreadyPending(o.TrfrID) {
@@ -349,17 +381,23 @@ func (n *Node) PTCCustom(line string) int {
 	if o.TimeStamp < n.LastBlockData().TimeStart {
 		code = 4
 	}
-	if n.TrxExistsInLastBlock(o.TrfrID) {
+	if n.TrxSeenRecently(o.TrfrID) {
 		code = 5
 	}
 	if n.AddressAlreadyCustomized(addr) {
 		code = 6
 	}
+	if !ValidAlias(o.Receiver) {
+		code = 11
+	}
 	if n.AliasAlreadyExists(o.Receiver) {
 		code = 7
 	}
-	if !crypto.VerifySignedString("Customize this "+addr+" "+o.Receiver, o.Signature, o.Sender) {
-		code = 8
+	if o.OrderID != SingleOrderID(o.TrfrID) {
+		code = 12
+	}
+	if c := VerifyOrder(o); c != 0 {
+		code = c
 	}
 	if code == 0 {
 		op := codec.GetOpData(line)
@@ -371,20 +409,26 @@ func (n *Node) PTCCustom(line string) int {
 	return code
 }
 
-// PTCSendGVT mirrors PTC_SendGVT (mpprotocol.pas:956-985). COMPAT: the
-// Pascal function leaves Result undefined for an unparsable line; 0 is
-// returned here.
+// PTCSendGVT mirrors PTC_SendGVT (mpprotocol.pas:956-985). FIX(M-14, L-03):
+// the OWNER of the GVT authorises the transfer with their own key (the
+// original demanded the developer key, which froze every owner's GVT).
 func (n *Node) PTCSendGVT(line string) int {
 	o, ok := types.ParseOrder(line)
 	if !ok {
-		return 0
+		return 17
 	}
 	addr := crypto.GetAddressFromPublicKey(o.Sender, 0)
 	code := 0
+	if o.OrderType != "SNDGVT" {
+		code = 16
+	}
 	if addr != o.Address {
 		code = 1
 	}
-	if n.AddressAvailable(addr) < consensus.GetCustFee(n.MyLastBlock()) {
+	if o.AmmountFee != consensus.GetCustFee(n.MyLastBlock()) || o.AmmountTrf != 0 {
+		code = 9
+	}
+	if n.AddressAvailable(addr) < o.AmmountFee {
 		code = 2
 	}
 	if n.TranxAlreadyPending(o.TrfrID) {
@@ -393,18 +437,24 @@ func (n *Node) PTCSendGVT(line string) int {
 	if o.TimeStamp < n.LastBlockData().TimeStart {
 		code = 4
 	}
-	if n.TrxExistsInLastBlock(o.TrfrID) {
+	if n.TrxSeenRecently(o.TrfrID) {
 		code = 5
 	}
 	if n.GVTAlreadyTransferred(o.Reference) {
 		code = 6
 	}
-	toSign := "Transfer GVT " + o.Reference + " " + o.Receiver + codec.IntToStr(o.TimeStamp)
-	if !crypto.VerifySignedString(toSign, o.Signature, o.Sender) {
-		code = 7
-	}
-	if o.Sender != consensus.AdminPubKey {
+	num := codec.StrToIntDef(o.Reference, -1)
+	if num < 0 || num > 99 || n.GVTs.Index(int(num)).Owner != addr {
 		code = 8
+	}
+	if !ValidReceiver(o.Receiver) {
+		code = 10
+	}
+	if o.OrderID != SingleOrderID(o.TrfrID) {
+		code = 12
+	}
+	if c := VerifyOrder(o); c != 0 {
+		code = c
 	}
 	if code == 0 {
 		op := codec.GetOpData(line)
