@@ -37,7 +37,7 @@ func cmdSystem(d *Dispatcher, l string) {
 	if d.N.ConStatus() > 0 {
 		return
 	}
-	switch strings.ToUpper(p(l, 1)) {
+	switch codec.ASCIIUpper(p(l, 1)) {
 	case "POWER":
 		start := time.Now()
 		var wg sync.WaitGroup
@@ -77,7 +77,7 @@ func cmdSystem(d *Dispatcher, l string) {
 		}
 		d.log("Download speed   : %d Kb/s", n/ms)
 	default:
-		d.log("Invalid parameter: %s\nUse: power, mem or downspeed", strings.ToUpper(p(l, 1)))
+		d.log("Invalid parameter: %s\nUse: power, mem or downspeed", codec.ASCIIUpper(p(l, 1)))
 	}
 }
 
@@ -119,15 +119,7 @@ func walletBalance(d *Dispatcher) int64 {
 	return total - d.N.MontoOutgoing
 }
 
-func newWalletAddress(d *Dispatcher) types.Wallet {
-	kp := crypto.GenerateKeyPair()
-	var w types.Wallet
-	w.Hash = crypto.GetAddressFromPublicKey(kp.PublicKey, 0)
-	w.PublicKey, w.PrivateKey = kp.PublicKey, kp.PrivateKey
-	d.N.Wallet.Insert(w)
-	d.N.Wallet.Save()
-	return w
-}
+func newWalletAddress(d *Dispatcher) (types.Wallet, error) { return d.N.Wallet.NewAddress() }
 
 func cmdShowWallet(d *Dispatcher, l string) {
 	for _, w := range d.N.Wallet.All() {
@@ -138,18 +130,14 @@ func cmdShowWallet(d *Dispatcher, l string) {
 }
 
 // cmdExpWallet writes the addresses as a plaintext .pkw file, the format
-// impwallet reads (mpparser.pas:431-448). FIX(finding 11): it used to copy
-// the wallet file, which is ciphertext, and report success. The new file is
-// created exclusively with mode 0600 and the console says that it holds
-// unencrypted private keys; an existing file, in particular the live
-// wallet, is never touched.
+// impwallet reads (mpparser.pas:431-448). It never overwrites a file.
 func cmdExpWallet(d *Dispatcher, l string) {
 	dest := strings.ReplaceAll(p(l, 1), "*", " ")
 	if dest == "" {
 		d.log("Syntax: expwallet {destination}")
 		return
 	}
-	if err := ExportWallet(d.N, dest+".pkw"); err != nil {
+	if err := d.N.Wallet.ExportPKW(dest + ".pkw"); err != nil {
 		if errors.Is(err, os.ErrExist) {
 			d.log("Error: Can not overwrite existing wallets")
 		} else {
@@ -157,26 +145,8 @@ func cmdExpWallet(d *Dispatcher, l string) {
 		}
 		return
 	}
-	d.log("Wallet saved as %s.pkw (unencrypted private keys: keep the file safe)", dest)
-}
-
-// ExportWallet writes every wallet record to path as a plaintext wallet
-// file. It fails with os.ErrExist rather than overwrite anything.
-func ExportWallet(n *node.Node, path string) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return err
-	}
-	var raw []byte
-	for _, w := range n.Wallet.All() {
-		raw = append(raw, w.Encode()...)
-	}
-	if _, err := f.Write(raw); err != nil {
-		f.Close()
-		_ = os.Remove(path)
-		return err
-	}
-	return f.Close()
+	d.log("Wallet saved as %s.pkw", dest)
+	d.log("%s", storage.PKWExportWarning)
 }
 
 func cmdImpWallet(d *Dispatcher, l string) {
@@ -186,20 +156,25 @@ func cmdImpWallet(d *Dispatcher, l string) {
 		d.log("Specified wallet file do not exists.")
 		return
 	}
-	if len(raw) < types.WalletSize || !crypto.IsValidHashAddress(types.DecodeWallet(raw).Hash) {
+	recs, err := storage.ParsePKW(raw)
+	if err != nil || !crypto.IsValidHashAddress(recs[0].Hash) {
 		d.log("The file is not a valid wallet")
 		return
 	}
 	added := 0
-	for i := 0; i+types.WalletSize <= len(raw); i += types.WalletSize {
-		w := types.DecodeWallet(raw[i:])
-		if d.N.Wallet.IndexOf(w.Hash) < 0 && crypto.IsValidHashAddress(w.Hash) {
-			d.N.Wallet.Insert(w)
-			added++
+	for _, w := range recs {
+		if crypto.IsValidHashAddress(w.Hash) {
+			ok, err := d.N.Wallet.Add(w)
+			if err != nil {
+				d.log("Wallet not saved: %v", err)
+				break
+			}
+			if ok {
+				added++
+			}
 		}
 	}
 	if added > 0 {
-		d.N.Wallet.Save()
 		d.log("Addresses imported: %d", added)
 	} else {
 		d.log("No new addreses found.")
@@ -260,8 +235,9 @@ func cmdGetMulti(d *Dispatcher, l string) {
 	addr := crypto.GetAddressFromPublicKey(key, crypto.AddTypeMulti)
 	if crypto.IsValidHashAddress(addr) {
 		d.log("New multiAddress: %s", addr)
-		d.N.Wallet.Insert(types.Wallet{Hash: addr, PublicKey: key})
-		d.N.Wallet.Save()
+		if _, err := d.N.Wallet.Add(types.Wallet{Hash: addr, PublicKey: key}); err != nil {
+			d.log("Wallet not saved: %v", err)
+		}
 	} else {
 		d.log("Something went wrong...")
 	}
@@ -703,16 +679,16 @@ func cmdSignCfg(d *Dispatcher, l string) {
 // and prints the offer; the exchange feature never publishes anything.
 func cmdPost(d *Dispatcher, l string) {
 	from := p(l, 1)
-	if strings.ToUpper(from) == "DEF" {
+	if codec.ASCIIUpper(from) == "DEF" {
 		from = d.N.Wallet.At(0).Hash
 	}
 	var amount int64
-	if strings.ToUpper(p(l, 2)) == "MAX" {
+	if codec.ASCIIUpper(p(l, 2)) == "MAX" {
 		amount = consensus.GetMaximunToSend(d.N.AddressAvailable(from))
 	} else {
 		amount = codec.StrToInt64Def(p(l, 2), 0)
 	}
-	market := strings.ToUpper(p(l, 3))
+	market := codec.ASCIIUpper(p(l, 3))
 	price := codec.StrToInt64Def(p(l, 4), 0)
 	total := amount * price / 100000000
 	pay := p(l, 5)

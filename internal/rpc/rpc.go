@@ -556,14 +556,22 @@ func (s *Server) newAddress(p string) string {
 	}
 	res := fmt.Sprintf("newaddress\x7ftrue\x7f%d\x7f", total)
 	for i := 0; i < total; i++ {
-		w := s.E.NewAddress() // saved with the wallet, which is encrypted
+		w, err := s.E.NewAddress() // saved with the wallet, which is encrypted
+		if err != nil {
+			s.logf("exceps", "new address not saved: "+err.Error())
+			return "newaddress\x7ffalse\x7f0\x7f"
+		}
 		res += w.Hash + "\x7f"
 	}
 	return res
 }
 
 func (s *Server) newAddressFull() string {
-	w := s.E.NewAddress()
+	w, err := s.E.NewAddress()
+	if err != nil {
+		s.logf("exceps", "new address not saved: "+err.Error())
+		return "newaddressfull\x7ffalse"
+	}
 	priv := ""
 	if s.N.Options().RPCExposeKeys { // FIX(H-09, H-10): keys are not sent over RPC by default
 		priv = w.PrivateKey
@@ -578,8 +586,7 @@ func (s *Server) setDefault(addr string) bool {
 		return false
 	}
 	if s.N.Wallet.Swap(0, idx) {
-		s.N.Wallet.Save()
-		return true
+		return s.N.Wallet.SaveErr() == nil
 	}
 	return false
 }

@@ -102,7 +102,7 @@ func sortStrings(a []string) {
 
 func (d *Dispatcher) exec(line string) {
 	cmd := codec.Parameter(line, 0)
-	up := strings.ToUpper(cmd)
+	up := codec.ASCIIUpper(cmd)
 	if d.Echo && !strings.Contains(HideCommands, up) && !Sensitive(line) {
 		d.log(">> %s", line)
 	}
@@ -120,7 +120,7 @@ func (d *Dispatcher) exec(line string) {
 // commands are never echoed or logged. FIX(H-10): the original logged every
 // command and the output of showkeys to its console log and crash report.
 func Sensitive(line string) bool {
-	switch strings.ToUpper(codec.Parameter(line, 0)) {
+	switch codec.ASCIIUpper(codec.Parameter(line, 0)) {
 	case "SHOWKEYS", "EXPKEYS", "NEWFROMKEYS", "SIGNCFG", "DIRECTIVE":
 		return true
 	}

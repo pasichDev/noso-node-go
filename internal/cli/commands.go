@@ -12,6 +12,7 @@ import (
 	"github.com/pasichDev/noso-node-go/internal/crypto"
 	"github.com/pasichDev/noso-node-go/internal/network"
 	"github.com/pasichDev/noso-node-go/internal/node"
+	"github.com/pasichDev/noso-node-go/internal/storage"
 	"github.com/pasichDev/noso-node-go/internal/types"
 )
 
@@ -158,9 +159,11 @@ func init() {
 
 		// wallet
 		"NEWADDRESS": func(d *Dispatcher, l string) {
-			w := newWalletAddress(d)
+			if _, err := newWalletAddress(d); err != nil {
+				d.log("Wallet not saved: %v", err)
+				return
+			}
 			d.log("1 new addresses")
-			_ = w
 		},
 		"BALANCE":    func(d *Dispatcher, l string) { d.log("%s NOSO", i2c(walletBalance(d))) },
 		"SHOWWALLET": cmdShowWallet,
@@ -236,14 +239,16 @@ func init() {
 				d.log("Failed")
 				return
 			}
-			d.log("Address exported to tempwallet.pkw (unencrypted private key: keep the file safe)")
+			d.log("Address exported to tempwallet.pkw")
+			d.log("%s", storage.PKWExportWarning)
 		},
 		"NEWFROMKEYS": func(d *Dispatcher, l string) {
 			var w types.Wallet
 			w.PublicKey, w.PrivateKey = p(l, 1), p(l, 2)
 			w.Hash = crypto.GetAddressFromPublicKey(w.PublicKey, 0)
-			d.N.Wallet.Insert(w)
-			d.N.Wallet.Save()
+			if _, err := d.N.Wallet.Add(w); err != nil {
+				d.log("Wallet not saved: %v", err)
+			}
 		},
 		"GETMULTI": cmdGetMulti,
 		"VALIDATE": func(d *Dispatcher, l string) { d.log("%s", boolStr(d.N.Wallet.IndexOf(p(l, 1)) >= 0)) },

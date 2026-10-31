@@ -10,7 +10,7 @@ import (
 var errConv = errors.New("rpc: conversion error")
 
 func strToBool(s string) (bool, error) {
-	switch strings.ToUpper(s) {
+	switch codec.ASCIIUpper(s) {
 	case "TRUE", "-1":
 		return true, nil
 	case "FALSE", "0":

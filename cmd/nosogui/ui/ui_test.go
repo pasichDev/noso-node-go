@@ -29,7 +29,9 @@ func newTestApp(t *testing.T) *App {
 	}
 	// three funded addresses; the default wallet has one
 	for len(a.n.Wallet.All()) < 3 {
-		a.e.NewAddress()
+		if _, err := a.e.NewAddress(); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for _, w := range a.n.Wallet.All() {
 		a.n.Summary.CreditTo(w.Hash, 1_000_000_000, 1)

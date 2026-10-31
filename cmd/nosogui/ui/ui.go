@@ -177,7 +177,6 @@ func (a *App) startNode(pass []byte, plain bool, step func(string)) error {
 		fyne.Do(func() { a.shutdown() })
 	}
 	a.r.Restart = nil
-	e.CommandHook = func(line string) { a.runCommand(line) }
 	step("✓ GUI initialized")
 	if !a.headless {
 		e.UpdateTimeOffset(n.CFG.Param(2))

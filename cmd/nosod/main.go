@@ -107,13 +107,6 @@ func run(opt options, sig <-chan os.Signal) (restart bool) {
 	}
 	d.Quit = ask
 	r.Restart = func() { ask(true) }
-	e.CommandHook = func(line string) {
-		if cli.Sensitive(line) { // FIX(H-10): never log key material
-			d.RunTo(line, func(string) {})
-			return
-		}
-		d.RunTo(line, func(s string) { logf("console", s) })
-	}
 
 	if !*noNTP {
 		e.UpdateTimeOffset(n.CFG.Param(2))

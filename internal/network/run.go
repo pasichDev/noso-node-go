@@ -78,7 +78,7 @@ func (e *Engine) Tick() {
 	e.engineLastUpdate = n.UTCTime()
 	build := e.buildNMSBlock
 	e.mu.Unlock()
-	if n.Options().BuildBlocks && n.UTCTime() >= build && build > 0 && n.ConStatus() == 3 &&
+	if n.Options().BuildBlocks && n.InTurn(build) && n.UTCTime() >= build && build > 0 && n.ConStatus() == 3 &&
 		codec.IntToStr(n.MyLastBlock()) == e.GetConsensus(CLastBlock) {
 		e.logf("events", "Starting construction of block "+codec.IntToStr(n.MyLastBlock()+1))
 		_, err := n.BuildNewBlock(n.MyLastBlock()+1, build, n.MyLastBlockHash(), BuildMiner, BuildSolution)
@@ -90,7 +90,6 @@ func (e *Engine) Tick() {
 		e.mu.Unlock()
 	}
 	e.saveUpdatedFiles()
-	e.drainCommands()
 	e.ReadClientsCheck()
 	e.ParseProtocolLines()
 	e.VerifyConnectionStatus()
@@ -130,27 +129,6 @@ func (e *Engine) BuildTime() int64 {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.buildNMSBlock
-}
-
-// Submit queues a console command line for the heartbeat (ProcessLinesAdd).
-func (e *Engine) Submit(line string) {
-	select {
-	case e.cmds <- line:
-	default:
-	}
-}
-
-func (e *Engine) drainCommands() {
-	for {
-		select {
-		case l := <-e.cmds:
-			if e.CommandHook != nil {
-				e.CommandHook(l)
-			}
-		default:
-			return
-		}
-	}
 }
 
 // keepConnectLoop mirrors TThreadKeepConnect (masterpaskalform.pas:1401).

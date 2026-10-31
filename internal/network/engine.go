@@ -3,7 +3,6 @@ package network
 import (
 	"net"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -87,16 +86,12 @@ type Engine struct {
 
 	stop chan struct{}
 	wg   sync.WaitGroup
-	cmds chan string
-
-	// CommandHook executes a console line from the process queue.
-	CommandHook func(line string)
 }
 
 // NewEngine builds an engine around a node and wires the node hooks.
 func NewEngine(n *node.Node) *Engine {
 	e := &Engine{N: n, MinPeers: 3, bots: map[string]int64{}, ipCtl: map[string]int{},
-		stop: make(chan struct{}), cmds: make(chan string, 256),
+		stop:   make(chan struct{}),
 		expect: map[expectKey]int64{}, fileLast: map[string]int64{}, heavy: map[string][]int64{}, lineLog: map[int][]int64{},
 		byteWin: map[int]*window{}, mnRepoWin: map[int]*window{}, sendSlots: make(chan struct{}, maxSendsAtOnce)}
 	e.Dial = func(addr string, to time.Duration) (net.Conn, error) { return net.DialTimeout("tcp", addr, to) }
@@ -458,7 +453,7 @@ func (e *Engine) charge(m map[int]*window, slot, amount, span, limit int) bool {
 // lineAllowed applies the size and budget rules to one received line.
 func (e *Engine) lineAllowed(sl int, line string) bool {
 	max := maxLineDefault
-	switch strings.ToUpper(codec.Parameter(line, 4)) {
+	switch codec.ASCIIUpper(codec.Parameter(line, 4)) {
 	case "MNFILE":
 		max = maxLineMNFile
 	case "$MNREPO":

@@ -51,7 +51,20 @@ func TestLoopbackSync(t *testing.T) {
 	clkA.v.Store(base)
 	clkB.v.Store(base)
 	a, b := mkNode(t, &clkA), mkNode(t, &clkB)
+	// the chain's proposer list: A signs its blocks, B accepts only those
+	for _, n := range []*node.Node{a, b} {
+		if err := n.SetProposers([]string{a.Wallet.At(0).PublicKey}); err != nil {
+			t.Fatal(err)
+		}
+	}
 
+	// Blocks are sealed by an authorised proposer: A's default key is the
+	// only proposer on both nodes.
+	for _, n := range []*node.Node{a, b} {
+		if err := n.SetProposers([]string{a.Wallet.At(0).PublicKey}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	// A builds three blocks on its own, one per 10 minutes.
 	miner := a.Wallet.At(0).Hash
 	dest := "N3DthVsfEUtqrgWFHTEB6F88xLkT3Df"

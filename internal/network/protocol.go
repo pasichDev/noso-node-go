@@ -375,7 +375,7 @@ func (e *Engine) handleLine(sl int, c *Conn, line string, client bool) bool {
 			}
 			return true
 		}
-		if !strings.Contains(ValidProtocolCommands, strings.ToUpper(codec.Parameter(line, 4))) {
+		if !strings.Contains(ValidProtocolCommands, codec.ASCIIUpper(codec.Parameter(line, 4))) {
 			return false // unexpected line: the connection is closed
 		}
 	}
@@ -589,7 +589,7 @@ func (e *Engine) ParseProtocolLines() {
 			if !ok {
 				break
 			}
-			cmd := strings.ToUpper(codec.Parameter(line, 4))
+			cmd := codec.ASCIIUpper(codec.Parameter(line, 4))
 			peer := e.peers.get(sl)
 			switch {
 			case !IsValidProtocol(line) && !peer.Autentic:

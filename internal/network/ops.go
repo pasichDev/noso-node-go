@@ -235,14 +235,8 @@ func (e *Engine) Customize(line string, say Printer) bool {
 }
 
 // NewAddress mirrors the crypto thread's address generation (tipo 1).
-func (e *Engine) NewAddress() types.Wallet {
-	kp := crypto.GenerateKeyPair()
-	var w types.Wallet
-	w.Hash = crypto.GetAddressFromPublicKey(kp.PublicKey, 0)
-	w.PublicKey, w.PrivateKey = kp.PublicKey, kp.PrivateKey
-	e.N.Wallet.Insert(w)
-	e.N.Wallet.Save()
-	return w
+func (e *Engine) NewAddress() (types.Wallet, error) {
+	return e.N.Wallet.NewAddress() // written through before it is returned
 }
 
 // OrderGroup is TOrderGroup (nosounit.pas:26-37).

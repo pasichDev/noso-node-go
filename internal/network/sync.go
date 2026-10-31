@@ -133,15 +133,13 @@ func (e *Engine) SyncWithMainnet() {
 	}
 	now := n.UTCTime()
 	consLB := codec.StrToIntDef(e.GetConsensus(CLastBlock), -1)
-	if n.MyLastBlock() > consLB && consLB >= 0 {
-		removed := n.RemoveBlocks(consLB)
-		if removed < 0 { // FIX(H-04): refuse a deep rollback on the word of peers
-			e.logf("console", "consensus is far behind our chain; refusing to delete blocks")
-			return
-		}
-		e.logf("console", codec.IntToStr(int64(removed))+" blocks deleted")
-		n.UndoLastBlock()
-		return
+	// FIX(M-10, H-04): a vote never deletes a block. Being ahead of the
+	// seeds is not an error (they will fetch our blocks), and a different tip
+	// is settled by the chain rules (node.AcceptBlocks: heaviest valid
+	// branch), not by counting seeds.
+	if consLB >= 0 && myLast0(n) >= consLB && n.TipHashAt(consLB) != e.GetConsensus(CLBHash) &&
+		e.GetConsensus(CLBHash) != "" && n.TipHashAt(consLB) != "" {
+		n.ProbeFork()
 	}
 	nlbv := codec.StrToIntDef(e.GetConsensus(CLastBlock), 0)
 	myLast := n.MyLastBlock()
@@ -184,26 +182,26 @@ func (e *Engine) SyncWithMainnet() {
 		n.ClearMNsList()
 		if e.lastTimeRequestBlock+5 < now && !e.downloadBlocks {
 			if s, ok := e.ValidSlotForSeed(); ok {
-				e.request(s, 8, "BLOCKS")
+				e.requestBlocks(s)
 				e.lastTimeRequestBlock = now
 			}
+		}
+	}
+	// a suspected fork: ask for blocks from before our tip
+	if n.ForkProbe() && e.lastTimeRequestBlock+5 < now && !e.downloadBlocks {
+		if s, ok := e.ValidSlotForSeed(); ok {
+			e.requestBlocks(s)
+			e.lastTimeRequestBlock = now
 		}
 	}
 	// summary
 	if codec.Copy(n.Headers.Hash(), 0, 5) == e.GetConsensus(CHeaders) && myLast == nlbv &&
 		codec.Copy(n.Summary.Hash(), 0, 5) != e.GetConsensus(CSumHash) {
-		if n.Summary.LastOp()+2*consensus.SumMarkInterval < myLast {
-			if e.lastTimeRequestSumary+5 < now && !e.downloadSumary {
-				if s, ok := e.ValidSlotForSeed(); ok {
-					e.request(s, 6, "SUMARY")
-					e.lastTimeRequestSumary = now
-				}
-			}
-		} else {
-			e.rebuildingSumary = true
-			_ = n.CompleteSummary()
-			e.rebuildingSumary = false
-		}
+		// FIX(C-03): the summary is derived from the blocks we hold and
+		// checked while they are applied; it is never downloaded on a vote.
+		e.rebuildingSumary = true
+		_ = n.CompleteSummary()
+		e.rebuildingSumary = false
 	}
 	// GVTs
 	if e.GetConsensus(CGVTsHash) != codec.Copy(n.GVTs.Hash(), 0, 5) && e.lastTimeGVTsRequest+5 < now &&
@@ -244,13 +242,10 @@ func (e *Engine) SyncWithMainnet() {
 	switch {
 	case codec.Copy(n.Headers.Hash(), 0, 5) == e.GetConsensus(CHeaders) && myLast == nlbv &&
 		sumPrefix != e.GetConsensus(CSumHash) && n.Summary.LastOp() == myLast && e.lastTimeRequestSumary+5 < now:
-		if s, ok := e.ValidSlotForSeed(); ok {
-			e.request(s, 6, "SUMARY")
-			e.lastTimeRequestSumary = now
-		}
+		n.RebuildOnceFor(myLast) // replay once; a vote cannot replace our state
 	case myLast == nlbv && (codec.Copy(n.Headers.Hash(), 0, 5) != e.GetConsensus(CHeaders) ||
 		n.MyLastBlockHash() != e.GetConsensus(CLBHash)):
-		n.UndoLastBlock()
+		n.ProbeFork() // FIX(M-10): look at their branch instead of undoing ours
 	case codec.Copy(n.Headers.Hash(), 0, 5) != e.GetConsensus(CHeaders) && nlbv == myLast &&
 		n.MyLastBlockHash() == e.GetConsensus(CLBHash) && sumPrefix == e.GetConsensus(CSumHash) && !e.downloadHeaders:
 		if s, ok := e.ValidSlotForSeed(); ok {
@@ -266,3 +261,16 @@ func (e *Engine) SyncWithMainnet() {
 
 var _ = storage.FundsAddress
 var _ = strings.TrimSpace
+
+func myLast0(n interface{ MyLastBlock() int64 }) int64 { return n.MyLastBlock() }
+
+// requestBlocks asks a peer for blocks after n.BlocksRequestFrom(): our tip,
+// or earlier when a fork is suspected.
+func (e *Engine) requestBlocks(slot int) {
+	line := e.ProtocolLine(8)
+	if i := strings.LastIndex(line, " "); i >= 0 {
+		line = line[:i+1] + codec.IntToStr(e.N.BlocksRequestFrom())
+	}
+	e.expectReply(slot, "BLOCKS")
+	e.PTCSendLine(slot, line)
+}

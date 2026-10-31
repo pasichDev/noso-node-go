@@ -45,7 +45,10 @@ func TestRestartOnlyWhenAvailable(t *testing.T) {
 func TestLocalAddressAndNoPlaintextKeys(t *testing.T) {
 	s := newServer(t)
 	s.N.UpdateOptions(func(o *node.StorageOptions) { o.RPCSaveNew = true })
-	w := s.E.NewAddress()
+	w, err := s.E.NewAddress()
+	if err != nil {
+		t.Fatal(err)
+	}
 	got := s.parse(`{"jsonrpc":"2.0","method":"islocaladdress","params":["`+w.Hash+`"],"id":1}`, false)
 	if !strings.Contains(got, `"result":true`) {
 		t.Fatalf("own address not recognised: %s", got)
