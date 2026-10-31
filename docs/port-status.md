@@ -151,44 +151,49 @@ Go locations are in `internal/` unless noted.
 
 Every command of the dispatch table exists, except these which were
 removed: `update`, `getbeta`, `checkupdates`, `sendreport`, `testnet`
-(security, C-08 and M-02). `clear`, `setport` and `showpending` keep their
-original (no-op or "deprecated") behaviour. `TestEveryOriginalCommandHasAHandler`
+(security, C-08 and M-02). `clear`, `setport`, `showpending` and `clearpsos` keep their
+original (no-op or "deprecated") behaviour or, for `clearpsos`, do nothing in this port. `expkeys` prints the keys (the original copies them to the clipboard). `restart` works in nosod (in-process reopen); the GUI answers that it cannot restart. `TestEveryOriginalCommandHasAHandler`
 checks the list.
 
 ## GUI (`cmd/nosogui`, Fyne, build tag `gui`)
 
 The toolkit is Fyne 2.8.2. It needs a C compiler and OpenGL/X11 development
 headers (it is not pure Go). Every row below says what was checked.
-**Launched** = the binary was started with an unattended passphrase and tab
-selection (`NOSO_WALLET_PASSPHRASE`, `NOSO_GUI_TAB`), stayed alive for 6 s
-and created the data directory with the encrypted wallet. **Compiled only** =
-type-checked and built, never seen on screen. No screen was inspected
-visually: screen capture on the build machine returned black images, and no
-clicks were possible, so no interaction was exercised.
+**Driven** = the real widgets were exercised in `cmd/nosogui/ui/ui_test.go`
+with Fyne's test driver (`fyne.io/fyne/v2/test`, build tag `gui`): the test
+taps, types and selects, then asserts on node state. **Rendered** = the screen
+was drawn by Fyne's software renderer in that test and the PNG was looked at
+(`NOSO_GUI_SHOTS=<dir> go test -tags gui ./cmd/nosogui/ui` writes them; with
+no peers and an empty chain, so grids hold the default wallet, three funded
+test addresses and nothing else). **Compiled only** = built, never drawn or
+exercised. NOT done: the real OpenGL window of the binary was not started
+in this review round, so window-system behaviour (native dialogs, menu bar,
+clipboard, window close button) is unverified. The test driver also runs
+`fyne.Do` inline, so the one-second refresh loop is not exercised.
 
 | Original form / handler | Go | Verified |
 |---|---|---|
-| `FormInicio` (startup grid), `StartProgram`, `InicoTimerEjecutar` | `ui.showStartup`, `ui.startNode` | launched (unattended path); prompt screen compiled only |
-| Main form `TForm1`, menu (`MMImpWallet`, `MMExpWallet`, `MMRestart`, `MMQuit`) | `ui.buildMain`, File menu | compiled only |
-| Status bar (`UpdateStatusBar`, `StaConLab`, rotor, server/RPC icons, clock) | status label in `refresh` | launched (refresh loop runs) |
+| `FormInicio` (startup grid), `StartProgram`, `InicoTimerEjecutar` | `ui.showStartup`, `ui.startNode` | startup prompt compiled only; `startNode` driven (data directory, wallet, node) |
+| Main form `TForm1`, menu (`MMImpWallet`, `MMExpWallet`, `MMRestart`, `MMQuit`) | `ui.buildMain`, File menu | rendered (all six tabs); File menu: Quit goes through `shutdown` (driven), import/export dialogs compiled only. Restart item removed |
+| Status bar (`UpdateStatusBar`, `StaConLab`, rotor, server/RPC icons, clock) | status label in `refresh` | rendered; refresh loop compiled only |
 | Info line (`Info`, `InfoTimer`) | `ui.info` | compiled only |
-| `TabAddresses`: `DireccionesPanel` and draw cell, `BDefAddrOnClick`, `BCustomAddrOnClick`, `EditCustomKeyUp`, `BOkCustomClick`, `PanelCustomMouseLeave`, `BNewAddrOnClick`, `BCopyAddrClick`, `LabelBigBalance` | wallet tab | launched (tab 0), interactions compiled only |
-| Send panel: `SBSCPasteOnClick`, `SBSCMaxOnClick`, `EditSCDestChange`, `EditMontoOnKeyUp` (replaced by validation of the amount text), `EditSCMontChange`, `SCBitSendOnClick`, `SCBitConfOnClick`, `SCBitCancelOnClick`, `ResetSendFundsPanel` | wallet tab form | compiled only; amount parsing is unit-testable but not tested |
-| `TabConsole`, `ConsoleLineKeyup` (Enter, F3, Esc), console and line popups (`ConsolePopUpClear/Copy`, `ConsoLinePopUp*`) | console tab (buttons replace popups) | launched (tab 1) |
-| `TabMonitor`: data panel (`InitGUI`, `DataPanelResize`), `SGConSeeds`/consensus, connections form `FormSlots` (`StaConLabDblClick`) | monitor tab: Data, Connections, Consensus | launched (tab 2) |
-| Debug logs (`MemoLog`, `MemoExceptLog`, `Button1Click`, `Button2Click`, `TUpdateLogs`) | Events and Exceptions sub tabs | compiled only |
-| Processes tab (`SG_OpenThreads`, `SG_FileProcs`, performance grid) | informational goroutine/memory page | compiled only; thread and file tables intentionally not ported (no counterpart) |
-| `TabNodes` / `GridNodes`, reported and verified masternodes | masternodes tab | launched (tab 3) |
-| `TabGVTs`, `GVTsGrid`, `PanelTransferGVT` | GVT tab | launched (tab 4) |
-| Options: wallet (`CB_WO_HideEmptyChange`, `CB_WO_MultisendChange`, `CBKeepBlocksDBChange`, `CBRunNodeAloneChange`) | options, Wallet | launched (tab 5) |
+| `TabAddresses`: `DireccionesPanel` and draw cell, `BDefAddrOnClick`, `BCustomAddrOnClick`, `EditCustomKeyUp`, `BOkCustomClick`, `PanelCustomMouseLeave`, `BNewAddrOnClick`, `BCopyAddrClick`, `LabelBigBalance` | wallet tab | rendered; selection driven (`TestSendFromSelectedAddress`); customize, set default, copy, new address compiled only |
+| Send panel: `SBSCPasteOnClick`, `SBSCMaxOnClick`, `EditSCDestChange`, `EditMontoOnKeyUp` (replaced by validation of the amount text), `EditSCMontChange`, `SCBitSendOnClick`, `SCBitConfOnClick`, `SCBitCancelOnClick`, `ResetSendFundsPanel` | wallet tab form | driven: select address, enter destination and amount, Send, Confirm, order built from the selected address (`TestSendFromSelectedAddress`); paste, max, cancel compiled only |
+| `TabConsole`, `ConsoleLineKeyup` (Enter, F3, Esc), console and line popups (`ConsolePopUpClear/Copy`, `ConsoLinePopUp*`) | console tab (buttons replace popups) | rendered; typed command and Enter driven (`TestConsoleCommands`); F3/Esc, popups compiled only |
+| `TabMonitor`: data panel (`InitGUI`, `DataPanelResize`), `SGConSeeds`/consensus, connections form `FormSlots` (`StaConLabDblClick`) | monitor tab: Data, Connections, Consensus | rendered (Data, Connections, Consensus); Consensus empty without peers |
+| Debug logs (`MemoLog`, `MemoExceptLog`, `Button1Click`, `Button2Click`, `TUpdateLogs`) | Events and Exceptions sub tabs | rendered (empty) |
+| Processes tab (`SG_OpenThreads`, `SG_FileProcs`, performance grid) | informational goroutine/memory page | rendered; thread and file tables intentionally not ported (no counterpart) |
+| `TabNodes` / `GridNodes`, reported and verified masternodes | masternodes tab | rendered, empty list (no masternodes in the fixture) |
+| `TabGVTs`, `GVTsGrid`, `PanelTransferGVT` | GVT tab | rendered, empty list; transfer compiled only |
+| Options: wallet (`CB_WO_HideEmptyChange`, `CB_WO_MultisendChange`, `CBKeepBlocksDBChange`, `CBRunNodeAloneChange`) | options, Wallet | rendered; hide-empty checkbox driven (`TestHideEmptyOption`) |
 | Options: `CB_WO_AutoupdateChange`, `CBSendReportsChange` | removed | skipped on purpose (C-08, no reports are uploaded) |
-| Options: node (`TabNodeOptionsShow`, `BSaveNodeOptionsClick`, `BTestNodeClick`, `CBAutoIPClick`) | options, Node | compiled only |
-| Options: RPC (`CB_AUTORPCChange`, `LE_Rpc_PortEditingDone`, `LE_Rpc_PassEditingDone`, `CB_RPCFilterChange`, `CB_BACKRPCaddressesChange`, `MemoRPCWhitelistEditingDone`, `MemobannedmethodsEditingDone`) | options, RPC (the password became two tokens) | compiled only |
-| Options: About (`BitBtnWebClick`, `BitBtnDonateClick`, `Tab_Options_AboutResize`) | options, About | compiled only |
-| `formexplore` (file chooser) | native Fyne file dialogs for import and export | compiled only |
+| Options: node (`TabNodeOptionsShow`, `BSaveNodeOptionsClick`, `BTestNodeClick`, `CBAutoIPClick`) | options, Node | rendered; save and test compiled only |
+| Options: RPC (`CB_AUTORPCChange`, `LE_Rpc_PortEditingDone`, `LE_Rpc_PassEditingDone`, `CB_RPCFilterChange`, `CB_BACKRPCaddressesChange`, `MemoRPCWhitelistEditingDone`, `MemobannedmethodsEditingDone`) | options, RPC (the password became two tokens) | rendered; the 'save new addresses' box is gone (it wrote plaintext key files, H-10); start/stop compiled only |
+| Options: About (`BitBtnWebClick`, `BitBtnDonateClick`, `Tab_Options_AboutResize`) | options, About | rendered; links compiled only |
+| `formexplore` (file chooser) | native Fyne file dialogs for import and export | export asks for a directory and writes through `expwallet` (never overwrites); dialogs compiled only |
 | `mpgui` helpers (`ThisPercent`, resize handlers, `ProcessHint`, `UpdateMyGVTsList`, `OutText`, `CloseAllForms`) | Fyne layout, `ui.refresh` | layout code compiled only |
 | `mplang`, `translation` (resource strings, `.po` files) | skipped | the GUI is English only; translating is a data task, not logic |
-| `FormCloseQuery`, `CloseeAppSafely` | `ui.shutdown` | compiled only |
+| `FormCloseQuery`, `CloseeAppSafely` | `ui.shutdown` | driven (`TestShutdownOnce`: options saved, servers stopped, closed marker written, once) |
 | `TThreadDirective`, `TThreadKeepConnect` etc. | `network.Engine` goroutines | logic, tested in `network` |
 
 No business logic lives in the GUI: balances, sending, customization, GVT

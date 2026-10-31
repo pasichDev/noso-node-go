@@ -22,7 +22,7 @@ with content type `text/html`, like the original.
 | Method | Params | Result objects |
 |---|---|---|
 | `test` | | `{"result":"testok"}` |
-| `restart` | | `{"result":"True"}` (restarts after block age) |
+| `restart` | | `{"result":"True"}`; nosod closes and reopens the node in the same process. Front ends that cannot restart (the GUI) answer `Invalid method` |
 | `getaddressbalance` | addresses or aliases | `{"valid","address","alias","balance","incoming","outgoing"}`; unknown address: `valid:false, alias:null, -1` values; an unknown *alias* is silently skipped |
 | `getorderinfo` | order id | `{"valid","order":{"orderid","timestamp","block","type","trfrs","receiver","amount","fee","reference","sender"}}` (orders already mined are found only with `BlocksDB True`) |
 | `getblocksinfo` | block numbers | `{"valid","number","timestart","timeend","timetotal","last20","totaltransactions","difficulty","target","solution","lastblockhash","nextdifficult","miner","feespaid","reward","hash"}` |
