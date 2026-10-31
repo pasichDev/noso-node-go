@@ -103,6 +103,13 @@ func (e *Engine) SaveConnection(tipo, ip string, conn *Conn, to int) int {
 		e.peers.slots[to] = mk()
 		return to
 	}
+	// FIX(finding 17): the duplicate check is made under the same lock as
+	// the insert; two simultaneous connections from one IP cannot both pass.
+	for i := 1; i <= MaxConnections; i++ {
+		if s := e.peers.slots[i]; s != nil && s.p.Tipo != "" && s.p.IP == p.IP && tipo == "CLI" {
+			return 0
+		}
+	}
 	for i := 1; i <= MaxConnections; i++ {
 		if s := e.peers.slots[i]; s == nil || s.p.Tipo == "" {
 			e.peers.slots[i] = mk()
@@ -277,35 +284,50 @@ func (e *Engine) setLastPing(i int, v string) {
 // 8 summary hash, 9 pending, 10 headers hash, 11 status, 12 port, 13 MNs
 // hash, 14 MNs count, 15 "null", 16 checks, 17 GVTs, 18 CFG, 19 PSOs.
 func (e *Engine) ProcessPing(line string, i int, reply bool) {
-	p := e.peers.get(i)
-	if p.Tipo == "" {
+	g := func(n int64) string { return codec.Parameter(line, n) }
+	lastBlock := codec.Truncate(g(6), 15)
+	lastBlockHash := codec.Truncate(g(7), 64)
+	sumHash := codec.Truncate(g(8), 64)
+	resumenHash := codec.Truncate(g(10), 64)
+	mnsHash := codec.Truncate(g(13), 5)
+	gvtsHash := codec.Truncate(g(17), 32)
+	cfgHash := codec.Truncate(g(18), 32)
+	merkle := crypto.IDHash(lastBlock + codec.Copy(resumenHash, 0, 5) + codec.Copy(mnsHash, 0, 5) +
+		codec.Copy(lastBlockHash, 0, 5) + codec.Copy(sumHash, 0, 5) +
+		codec.Copy(gvtsHash, 0, 5) + codec.Copy(cfgHash, 0, 5))
+	now := e.N.UTCTimeStr()
+	offset := codec.StrToInt64Def(g(3), e.N.UTCTime()) - e.N.UTCTime()
+	// FIX(finding 17): the fields are written into the slot under the table
+	// lock instead of copying the whole Peer out and back, which could
+	// overwrite IsBusy or LastPing set meanwhile by the slot's reader.
+	e.peers.mu.Lock()
+	if i < 1 || i > MaxConnections || e.peers.slots[i] == nil || e.peers.slots[i].p.Tipo == "" {
+		e.peers.mu.Unlock()
 		return
 	}
-	g := func(n int64) string { return codec.Parameter(line, n) }
+	p := &e.peers.slots[i].p
 	p.Autentic = true
 	p.Protocol = int(codec.StrToIntDef(g(1), 0))
 	p.Version = codec.Truncate(g(2), 8)
-	p.Offset = codec.StrToInt64Def(g(3), e.N.UTCTime()) - e.N.UTCTime()
+	p.Offset = offset
 	p.Connections = int(codec.StrToIntDef(g(5), 0))
-	p.LastBlock = codec.Truncate(g(6), 15)
-	p.LastBlockHash = codec.Truncate(g(7), 64)
-	p.SumarioHash = codec.Truncate(g(8), 64)
+	p.LastBlock = lastBlock
+	p.LastBlockHash = lastBlockHash
+	p.SumarioHash = sumHash
 	p.Pending = int(codec.StrToIntDef(g(9), 0))
-	p.ResumenHash = codec.Truncate(g(10), 64)
+	p.ResumenHash = resumenHash
 	p.ConexStatus = int(codec.StrToIntDef(g(11), 0))
 	p.ListeningPort = int(codec.StrToIntDef(g(12), -1))
-	p.MNsHash = codec.Truncate(g(13), 5)
+	p.MNsHash = mnsHash
 	p.MNsCount = int(codec.StrToIntDef(g(14), 0))
 	p.BestHashDiff = "null"
 	p.MNChecksCount = int(codec.StrToIntDef(g(16), 0))
-	p.LastPing = e.N.UTCTimeStr()
-	p.GVTsHash = codec.Truncate(g(17), 32)
-	p.CFGHash = codec.Truncate(g(18), 32)
+	p.LastPing = now
+	p.GVTsHash = gvtsHash
+	p.CFGHash = cfgHash
 	p.PSOHash = codec.Truncate(g(19), 32)
-	p.MerkleHash = crypto.IDHash(p.LastBlock + codec.Copy(p.ResumenHash, 0, 5) + codec.Copy(p.MNsHash, 0, 5) +
-		codec.Copy(p.LastBlockHash, 0, 5) + codec.Copy(p.SumarioHash, 0, 5) +
-		codec.Copy(p.GVTsHash, 0, 5) + codec.Copy(p.CFGHash, 0, 5))
-	e.peers.set(i, p)
+	p.MerkleHash = merkle
+	e.peers.mu.Unlock()
 	if reply {
 		e.TextToSlot(i, e.ProtocolLine(4))
 	}
@@ -315,8 +337,11 @@ func (e *Engine) ProcessPing(line string, i int, reply bool) {
 func (e *Engine) SyncedConnections() int {
 	c := 0
 	cons0 := e.GetConsensus(0)
+	if cons0 == "" {
+		return 0 // no consensus: nothing is synced (an empty hash equals an empty slot's)
+	}
 	for i := 1; i <= MaxConnections; i++ {
-		if e.peers.get(i).MerkleHash == cons0 {
+		if e.IsSlotConnected(i) && e.peers.get(i).MerkleHash == cons0 {
 			c++
 		}
 	}
@@ -327,6 +352,9 @@ func (e *Engine) SyncedConnections() int {
 // rotating scan for a slot whose Merkle hash equals consensus item 0.
 func (e *Engine) ValidSlotForSeed() (int, bool) {
 	cons0 := e.GetConsensus(0)
+	if cons0 == "" {
+		return 0, false
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for c := 0; c < MaxConnections; c++ {
@@ -334,7 +362,7 @@ func (e *Engine) ValidSlotForSeed() (int, bool) {
 		if e.slotCount > MaxConnections {
 			e.slotCount = 1
 		}
-		if e.peers.get(e.slotCount).MerkleHash == cons0 {
+		if e.IsSlotConnected(e.slotCount) && e.peers.get(e.slotCount).MerkleHash == cons0 {
 			return e.slotCount, true
 		}
 	}

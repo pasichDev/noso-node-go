@@ -401,3 +401,31 @@ func TestSlowReaderDoesNotBlockTick(t *testing.T) {
 		t.Fatal("H-11: sending a file to a slow reader blocked the heartbeat")
 	}
 }
+
+// Without a consensus nothing is "synced": empty hashes of empty slots must
+// not match the empty consensus (the status bar showed 99 synced peers and
+// the connection keeper stopped dialling).
+func TestNoConsensusNoSyncedPeers(t *testing.T) {
+	var ck clock
+	e := NewEngine(mkNode(t, &ck))
+	t.Cleanup(e.Stop)
+	if n := e.SyncedConnections(); n != 0 {
+		t.Fatalf("%d synced connections without a consensus", n)
+	}
+	if sl, ok := e.ValidSlotForSeed(); ok {
+		t.Fatalf("slot %d chosen without a consensus", sl)
+	}
+}
+
+// Two simultaneous connections from one IP cannot both be saved.
+func TestSaveConnectionRefusesSecondSlotOfIP(t *testing.T) {
+	var ck clock
+	e := NewEngine(mkNode(t, &ck))
+	t.Cleanup(e.Stop)
+	if e.SaveConnection("CLI", "5.5.5.5", nil, -1) == 0 {
+		t.Fatal("first refused")
+	}
+	if e.SaveConnection("CLI", "5.5.5.5", nil, -1) != 0 {
+		t.Fatal("second connection of the same IP saved")
+	}
+}

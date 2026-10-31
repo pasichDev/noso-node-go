@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pasichDev/noso-node-go/internal/codec"
@@ -301,7 +302,8 @@ func (e *Engine) GetMyIP() string {
 func (e *Engine) RunMNVerification(block int64, synctus, localIP, pub, priv string) string {
 	n := e.N
 	list := n.MNsList()
-	verified := make(chan string, len(list)+1)
+	var vmu sync.Mutex
+	var verifiedList []string
 	done := make(chan struct{}, len(list)+1)
 	launched := 0
 	for _, m := range list {
@@ -319,7 +321,9 @@ func (e *Engine) RunMNVerification(block int64, synctus, localIP, pub, priv stri
 					}
 				}
 				if node.CheckVerificationLine(line, nonce, synctus, m) {
-					verified <- m.IP + ";" + codec.IntToStr(int64(m.Port)) + ":"
+					vmu.Lock()
+					verifiedList = append(verifiedList, m.IP+";"+codec.IntToStr(int64(m.Port))+":")
+					vmu.Unlock()
 				}
 			}(m)
 		}
@@ -332,11 +336,11 @@ func (e *Engine) RunMNVerification(block int64, synctus, localIP, pub, priv stri
 			i = launched
 		}
 	}
-	close(verified)
-	vn := ""
-	for v := range verified {
-		vn += v
-	}
+	// FIX: the list is copied, not closed, so a worker still running after
+	// the deadline cannot panic on a closed channel.
+	vmu.Lock()
+	vn := strings.Join(verifiedList, "")
+	vmu.Unlock()
 	c := node.MNCheck{ValidatorIP: localIP, Block: int32(block), SignAddress: n.Options().MNSign, PubKey: pub, ValidNodes: vn}
 	c.Signature = crypto.SignCanonical(priv, "MNCHECK1", node.MNCheckFields(c)...)
 	return node.StringFromMNCheck(c)
