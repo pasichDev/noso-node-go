@@ -68,6 +68,9 @@ func run(opt options, sig <-chan os.Signal) (restart bool) {
 	if err != nil {
 		log.Fatalf("wallet passphrase: %v", err)
 	}
+	if err := cli.CheckNewPassphrase(*data, pass); err != nil { // finding 20
+		log.Fatalf("wallet passphrase: %v", err)
+	}
 	cfg := node.Config{WalletPassphrase: pass, InsecurePlainWallet: *plainWallet}
 	if *seedURL != "" {
 		cfg.FetchSeeds = func() string {
