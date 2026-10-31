@@ -16,7 +16,7 @@ messages.
 |---|---|
 | `nosod` | The node daemon: peer-to-peer server and client, block builder, JSON-RPC server, local control socket. |
 | `nosocli` | The console commands of the original node as a command line tool. Talks to a running `nosod`, or works on the data directory directly when none is running. |
-| `nosogui` | A desktop front end (Fyne) that uses the same packages as the other two. Built with `-tags gui`. |
+| `nosogui` | A desktop front end (Fyne 2.8) that uses the same packages as the other two. Built with `-tags gui`; needs a C compiler and OpenGL/X11 headers. Not visually verified, see docs/port-status.md. |
 
 All three use the same data directory layout as the original (`NOSODATA/`):
 `sumary.psk`, `blchhead.nos`, `gvts.psk`, `nosocfg.psk`, `masternodes.txt`,
