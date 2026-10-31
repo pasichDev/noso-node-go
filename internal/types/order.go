@@ -1,0 +1,72 @@
+package types
+
+import (
+	"strings"
+
+	"github.com/pasichDev/noso-node-go/internal/codec"
+)
+
+// StringFromOrder mirrors GetStringFromOrder (nosogeneral.pas:609-625).
+// COMPAT: the first token is the OrderType, not a command word; the second
+// copy of OrderType sits at its normal position (field order preserved).
+func StringFromOrder(o Order) string {
+	return strings.Join([]string{
+		o.OrderType, o.OrderID, codec.IntToStr(int64(o.OrderLines)), o.OrderType,
+		codec.IntToStr(o.TimeStamp), o.Reference, codec.IntToStr(int64(o.TrxLine)),
+		o.Sender, o.Address, o.Receiver, codec.IntToStr(o.AmmountFee),
+		codec.IntToStr(o.AmmountTrf), o.Signature, o.TrfrID,
+	}, " ")
+}
+
+// ParseOrder mirrors GetOrderFromString (mpprotocol.pas:93-121). Fields are
+// taken by position 1..13 (position 0 is the command token); StrToInt
+// failures make the whole parse fail while leaving the already assigned
+// fields in place, as in Pascal.
+func ParseOrder(line string) (Order, bool) {
+	var o Order
+	p := func(n int64) string { return codec.Parameter(line, n) }
+	o.OrderID = p(1)
+	v, ok := codec.StrToInt(p(2))
+	if !ok {
+		o.Normalize()
+		return o, false
+	}
+	o.OrderLines = v
+	o.OrderType = p(3)
+	t, ok := codec.StrToInt64(p(4))
+	if !ok {
+		o.Normalize()
+		return o, false
+	}
+	o.TimeStamp = t
+	o.Reference = p(5)
+	v, ok = codec.StrToInt(p(6))
+	if !ok {
+		o.Normalize()
+		return o, false
+	}
+	o.TrxLine = v
+	o.Sender, o.Address, o.Receiver = p(7), p(8), p(9)
+	if o.AmmountFee, ok = codec.StrToInt64(p(10)); !ok {
+		o.Normalize()
+		return o, false
+	}
+	if o.AmmountTrf, ok = codec.StrToInt64(p(11)); !ok {
+		o.Normalize()
+		return o, false
+	}
+	o.Signature, o.TrfrID = p(12), p(13)
+	o.Normalize()
+	return o, true
+}
+
+// StringFromHeader mirrors GetStringFromBlockHeader (mpprotocol.pas:145-161).
+func StringFromHeader(h BlockHeader) string {
+	i := func(v int64) string { return codec.IntToStr(v) }
+	return "Number:" + i(h.Number) + " Start:" + i(h.TimeStart) + " End:" + i(h.TimeEnd) +
+		" Total:" + i(int64(h.TimeTotal)) + " 20:" + i(int64(h.TimeLast20)) +
+		" Trxs:" + i(int64(h.TrxTotales)) + " Diff:" + i(int64(h.Difficult)) +
+		" Target:" + h.TargetHash + " Solution:" + h.Solution +
+		" NextDiff:" + i(int64(h.NxtBlkDiff)) + " Miner:" + h.AccountMiner +
+		" Fee:" + i(h.MinerFee) + " Reward:" + i(h.Reward)
+}
