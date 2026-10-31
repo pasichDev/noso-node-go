@@ -4,6 +4,7 @@ import (
 	"os"
 	"sync"
 
+	"github.com/pasichDev/noso-node-go/internal/codec"
 	"github.com/pasichDev/noso-node-go/internal/crypto"
 	"github.com/pasichDev/noso-node-go/internal/types"
 )
@@ -128,7 +129,7 @@ func (g *GVTs) ChangeOwner(n int, oldOwner, newOwner string) int {
 	if res == 0 {
 		g.mu.Lock()
 		if n < len(g.arr) {
-			g.arr[n].Owner = newOwner
+			g.arr[n].Owner = codec.Truncate(newOwner, 32) // String[32]
 		}
 		g.mu.Unlock()
 	}

@@ -220,11 +220,13 @@ func (c *CFG) IsSeedNode(ip string) bool {
 }
 
 // replaceFold is StringReplace(s, old, "", [rfReplaceAll, rfIgnoreCase]).
+// FPC folds with UpperCase, which is ASCII only, so both strings keep their
+// byte length and the offsets of one are valid in the other.
 func replaceFold(s, old string) string {
 	if old == "" {
 		return s
 	}
-	ls, lo := strings.ToLower(s), strings.ToLower(old)
+	ls, lo := codec.ASCIIUpper(s), codec.ASCIIUpper(old)
 	var sb strings.Builder
 	for i := 0; i < len(s); {
 		if strings.HasPrefix(ls[i:], lo) {

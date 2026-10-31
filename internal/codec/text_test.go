@@ -37,8 +37,10 @@ func TestStrToInt(t *testing.T) {
 	if _, ok := StrToInt64("12 "); ok {
 		t.Error("trailing blank must fail")
 	}
-	if _, ok := StrToInt("2147483648"); ok {
-		t.Error("overflow must fail")
+	// FPC 3.2.2 x86_64: Val range-checks against Int64 only; the narrowing to
+	// Integer wraps (derivation in val.go and docs/compatibility.md).
+	if v, ok := StrToInt("2147483648"); !ok || v != -2147483648 {
+		t.Errorf("32-bit wrap: %d %v", v, ok)
 	}
 	if v, ok := StrToInt64("-9223372036854775808"); !ok || v != -1<<63 {
 		t.Error("min int64")

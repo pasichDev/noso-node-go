@@ -31,30 +31,27 @@
 
 ## Base64
 
-Keys and signatures are standard Base64 with padding. COMPAT: before signing
-or verifying, the *message* is also run through the lenient Free Pascal
-Base64 decoder (`DecodeStringBase64(message)`), so the signed bytes are the
-decoded remains of the plain text (all non-Base64 characters dropped). The
-port implements the documented MIME-mode behaviour (skip characters outside
-the alphabet, stop at `=`); this could not be compared against the FPC
-runtime.
+Keys and signatures are standard Base64 with padding. They are decoded the
+way FPC's `DecodeStringBase64` does in its default MIME mode (`crypto/b64.go`
+follows `base64.pp`): the text is padded with `=` to a multiple of 4, the
+output size counts alphabet characters up to the first `=`, characters outside
+the alphabet are skipped while reading, and `=` ends a block. A trailing group
+with junk and no `=` is therefore dropped (`QUJDQUI*` gives `ABC`). This was
+derived from the FPC source, not run. Messages are no longer decoded (H-08).
 
 ## Signatures
 
-secp256k1, SHA-1 digest of the (decoded) message, ECDSA with random `k`,
-DER encoded, Base64 text (BouncyCastle `SHA-1withECDSA` via CryptoLib4Pascal).
-Verification accepts any valid DER signature, including high-S values.
-Public key = Base64 of the uncompressed point (65 bytes, 88 characters);
-compressed and hybrid encodings are accepted on verification. Private key =
-Base64 of the minimal big-endian scalar (no zero padding to 32 bytes).
+The signature scheme of the original (SHA-1 digest of the lenient-Base64
+decoded message, random `k`, any DER signature) is replaced; see "Changes
+from the original" below for what is used now. Public keys are Base64 of the
+uncompressed point (65 bytes, 88 characters); compressed and hybrid encodings
+are accepted on verification. Private key = Base64 of the minimal big-endian
+scalar (no zero padding to 32 bytes).
 
 ## Certificates
 
-`GetCertificate`: sign `OWN + address + time`, build
-`OWN:pubkey:time:signature`, XOR with the key `SHA256("noso")` (hex text),
-upper-case, prefix `1`, Base58, plus a 3 character checksum
-(`B58(sum of indices + length)`, left padded with `1`). `CheckCertificate`
-reverses it.
+The certificate format of the original (`OWN:pubkey:time:signature` XORed with
+`SHA256("noso")`) is replaced; see "Changes from the original" below.
 
 ## Multi-signature addresses
 

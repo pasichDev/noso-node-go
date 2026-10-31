@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -25,7 +26,7 @@ type PSO struct {
 	Mode    uint16
 	Hash    string
 	Owner   string
-	Expire  uint32
+	Expire  int32 // DWord in the record, but Integer in Pascal: FFFFFFFF reads as -1
 	Members string
 	Params  string
 }
@@ -88,7 +89,7 @@ func (p *PSOs) parse(raw []byte) bool {
 	}
 	for i := int32(0); i < h[1]; i++ {
 		var b [types.MNLockSize]byte
-		if _, err := r.Read(b[:]); err != nil {
+		if _, err := io.ReadFull(r, b[:]); err != nil { // ReadBuffer raises on a short read
 			return false
 		}
 		p.locks = append(p.locks, types.DecodeMNLock(b[:]))
@@ -99,7 +100,7 @@ func (p *PSOs) parse(raw []byte) bool {
 			return "", false
 		}
 		s := make([]byte, n)
-		if _, err := r.Read(s); err != nil && n > 0 {
+		if _, err := io.ReadFull(r, s); err != nil && n > 0 {
 			return "", false
 		}
 		return string(s), true
@@ -284,7 +285,7 @@ func PSOValue(label, params string) string {
 func (p *PSOs) AddNew(mode int, owner string, expire int, params string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.psos = append(p.psos, PSO{Mode: uint16(mode), Owner: owner, Expire: uint32(expire),
+	p.psos = append(p.psos, PSO{Mode: uint16(mode), Owner: owner, Expire: int32(expire),
 		Hash:   crypto.IDHash(owner + params + codec.IntToStr(int64(mode))),
 		Params: params})
 }

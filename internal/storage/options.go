@@ -72,18 +72,10 @@ func boolStr(b bool) string {
 	return "False"
 }
 
-// strToBool mirrors SysUtils.StrToBool for the files the node writes
-// (True/False); invalid text leaves the previous value (Pascal would raise
-// and abort loading the rest of the file, see LoadADV's try/except).
-func strToBool(s string) (bool, bool) {
-	switch strings.ToUpper(s) {
-	case "TRUE", "-1", "1":
-		return true, true
-	case "FALSE", "0":
-		return false, true
-	}
-	return false, false
-}
+// strToBool mirrors SysUtils.StrToBool; invalid text leaves the previous
+// value (Pascal would raise and abort loading the rest of the file, see
+// LoadADV's try/except).
+func strToBool(s string) (bool, bool) { return codec.TryStrToBool(s) }
 
 // Save writes advopt.txt exactly as CreateADV does.
 func (o *Options) Save(path string) error {

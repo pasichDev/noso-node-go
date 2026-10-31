@@ -178,6 +178,35 @@ func (s *SummaryDB) GetIndexPosition(text string, isAlias bool) (int64, types.Su
 	return s.lookupLocked(text, isAlias)
 }
 
+// AliasTaken reports whether any account, committed or changed in the
+// current block, holds the alias. Unlike GetIndexPosition(alias, true) it does
+// not depend on the alias index, which is only extended for NEW records
+// (COMPAT, see GetIndexPosition): a CUSTOM order of the previous block is
+// not in that index, so using it for uniqueness let a second address claim
+// the same alias (rewrite review item 6; FIX(C-06, M-01) intended this).
+func (s *SummaryDB) AliasTaken(alias string) bool {
+	if alias == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, b := range s.block {
+		if b.rec.Custom == alias {
+			return true
+		}
+	}
+	for _, r := range s.recs {
+		if r.Custom != alias {
+			continue
+		}
+		if i := s.findBlock(r.Hash); i >= 0 && s.block[i].rec.Custom != alias {
+			continue // changed in this block
+		}
+		return true
+	}
+	return false
+}
+
 // BalanceIndexed mirrors GetAddressBalanceIndexed (nosounit.pas:350-373).
 func (s *SummaryDB) BalanceIndexed(addr string) int64 {
 	s.mu.Lock()
@@ -392,6 +421,9 @@ func (s *SummaryDB) updateChangesLocked() error {
 					s.recs = append(s.recs, types.Summary{})
 				}
 				s.recs[b.slot] = b.rec
+				// FIX(M-01): an alias set on an existing record is indexed at
+				// once (nosounit.pas:535-543 only indexed new records).
+				s.addIndex(b.rec, b.slot)
 			}
 			if _, werr := f.WriteAt(b.rec.Encode(), b.slot*types.SummarySize); werr != nil {
 				err = werr

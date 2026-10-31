@@ -67,13 +67,25 @@ func TestSignedBigIntQuirk(t *testing.T) {
 func TestB16ToB58VsReference(t *testing.T) {
 	// For a positive top nibble B16ToB58 equals plain base58 of the bytes.
 	hexs := "0A" + strings.Repeat("11", 31)
-	b, _ := hexToBytes(hexs)
+	b := hexToBytes(hexs)
 	want := encodeDigits(new(big.Int).SetBytes(b), B58Alphabet)
 	if got := B16ToB58(hexs); got != want {
 		t.Fatalf("%s vs %s", got, want)
 	}
-	if B16ToB58("") != "1" || B16ToB58("zz") != "1" {
+	// Invalid hex does not raise in FPC (HexToBin stops at the first bad
+	// character, the rest of the buffer stays 0; ClpConverters.pas:480-498,
+	// classes/util.inc). Values derived from that source by hand.
+	if B16ToB58("") != "1" || B16ToB58("zz") != "" {
 		t.Error("defaults")
+	}
+	if got, want := B16ToB58("12zz"), B16ToB58("1200"); got != want {
+		t.Errorf("12zz = %q want %q", got, want)
+	}
+	if B16ToB10("FFzz") != "65280" || B16ToB36("FFxx") != encodeDigits(big.NewInt(65280), B36Alphabet) {
+		t.Errorf("FFzz %s %s", B16ToB10("FFzz"), B16ToB36("FFxx"))
+	}
+	if B16ToB10("1-2") != "1" || B16ToB10("FF-") != "15" { // odd length is padded before the dash is removed: "0FF" -> byte 0F
+		t.Errorf("dash %s %s", B16ToB10("1-2"), B16ToB10("FF-"))
 	}
 }
 
@@ -221,5 +233,36 @@ func FuzzParsersNoPanic(f *testing.F) {
 		CheckCertificate(s, s, s)
 		VerifyCanonical(s, s, s, s)
 		GetMultiSource(s, 2)
+	})
+}
+
+// Expected values derived by hand from fcl-base base64.pp (GetSize, Read).
+func TestDecodeBase64FPCMime(t *testing.T) {
+	for in, want := range map[string]string{
+		"QUJD": "ABC", "QUI=": "AB", "QUI": "AB", "QQ==": "A", "QQ": "A", "QUJDQUI*": "ABC",
+		"QUJDQU": "ABCA", "": "", "QU==QUJD": "A", "Q": "", "QUJD\nQUJD": "ABCABC", "QU*JD": "ABC",
+		"=QUJ": "", "QUJDQUJD=": "ABCABC", "QUJDQUJDQUJ*": "ABCABC",
+	} {
+		if got := string(DecodeBase64(in)); got != want {
+			t.Errorf("DecodeBase64(%q) = %q want %q", in, got, want)
+		}
+	}
+	for _, in := range []string{"", "A", "AB", "ABC", "abc\xff\x00"} {
+		if got := DecodeBase64(EncodeBase64([]byte(in))); string(got) != in {
+			t.Errorf("round trip %q: %q", in, got)
+		}
+	}
+}
+
+func FuzzDecodeBase64(f *testing.F) {
+	for _, s := range []string{"", "QUJD", "QUI=", "QUJDQUI*", "====", "A", strings.Repeat("QUJD", 400) + "=QUJD"} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		_ = DecodeBase64(s)
+		b := DecodeBase64(EncodeBase64([]byte(s)))
+		if string(b) != s {
+			t.Fatalf("round trip %q -> %q", s, b)
+		}
 	})
 }

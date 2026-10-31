@@ -28,9 +28,11 @@ func OpenBlocksDB(path string) *BlocksDB {
 	return d
 }
 
-// DBIndex mirrors nosoblock.pas:180-188: MD5 of the text, converted with
-// B16ToB58 (signed quirk included), characters 2..7 read as Base58 and
-// reduced modulo 100000.
+// DBIndex mirrors nosoblock.pas:180-188 with IDHash (SHA-256, FIX(M-13))
+// instead of MD5: the hash text is converted with B16ToB58 (signed quirk
+// included), characters 2..7 are read as Base58 and reduced modulo 100000.
+// COMPAT BREAK: an existing blocks_db.nos written by the Pascal node holds
+// MD5-based indexes that this function does not find; rebuild it.
 func DBIndex(text string) int32 {
 	t := crypto.B16ToB58(crypto.IDHash(text))
 	sub := codec.Copy(t, 2, 6)

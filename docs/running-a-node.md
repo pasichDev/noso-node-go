@@ -32,9 +32,25 @@ says `Updated!` the node is in state 3.
 the private keys encrypted with Argon2id and AES-256-GCM; there is no
 recovery without the passphrase.
 
-**Who builds blocks.** By default a node only follows the chain. Exactly the
-nodes you configure as proposers set `BuildBlocks True` in `advopt.txt`.
-Trust anchors have no defaults: set `AdminKey`, `ConfigKey`, `ValidatorKeys`
+Upgrading from the original node: with an old `wallet.pkw` in the data
+directory the first start with a passphrase copies its keys into
+`wallet.enc` after checking every key. The old `wallet.pkw` and its `.bak` are
+left in place, so a mistyped passphrase loses nothing (move the new
+`wallet.enc` away and start again). They still hold the keys in clear text:
+remove them yourself once you have opened `wallet.enc` with the right
+passphrase and backed it up.
+
+**Who builds blocks.** By default a node only follows the chain. A chain has
+a proposer list: `NOSODATA/proposers.txt`, one public key per line, the same
+list in the same order on every node of the chain (the public key of a wallet
+address is in the wallet). A node builds only if `BuildBlocks True` is set in
+`advopt.txt`, its wallet holds a key from that list and it is that key's turn
+(`consensus.md`); its blocks are sealed with that key and the block reward is
+paid to that address. A node with no list accepts no block from a peer. To
+start a chain: create the wallets of the proposers, put their public keys in
+`proposers.txt` on all nodes, start the proposers with `BuildBlocks True`;
+other nodes start empty and take the chain from block 0. Trust anchors have no
+defaults: set `AdminKey`, `ConfigKey`, `ValidatorKeys`
 and `SeedKeys` yourself (public keys; see `compatibility.md`).
 
 **RPC.** `rpcon` starts the server on `127.0.0.1`; the tokens are in
@@ -48,8 +64,12 @@ and `SeedKeys` yourself (public keys; see `compatibility.md`).
    address, `MNSign` a wallet address of this node.
 3. Open the TCP port, run `serveron` (or `Autoserver True`).
 
-The node reports itself every block between age 10 and 495, and the seed
-nodes verify it.
+The node reports itself every block between age 10 and 495. Every node that
+receives the report challenges the IP (`MNVER`, answered with the sign key)
+before it lists it. The funds key may stay cold: sign once, offline,
+`node.SignDelegation(fundsPrivateKey, signAddress, fundsAddress)` and store it
+with `Node.SetDelegation`; the sign key then reports and the stake can stay
+off the server.
 
 ## Using the original's data
 

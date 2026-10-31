@@ -49,10 +49,10 @@ func Parameter(line string, n int64, delim ...byte) string {
 }
 
 // GetCommand is nosogeneral.pas:183-186.
-func GetCommand(line string) string { return strings.ToUpper(Parameter(line, 0)) }
+func GetCommand(line string) string { return ASCIIUpper(Parameter(line, 0)) }
 
 // ProCommand is nosogeneral.pas:188-191 (the command of a protocol line).
-func ProCommand(line string) string { return strings.ToUpper(Parameter(line, 4)) }
+func ProCommand(line string) string { return ASCIIUpper(Parameter(line, 4)) }
 
 // GetOpData is mpparser.pas:178-183: everything from the first '$'. Pascal
 // copy(s, 0, n) with pos=0 returns the whole line, which is mirrored.
@@ -144,10 +144,25 @@ func Trim(s string) string {
 	return s[a:b]
 }
 
-// ASCIIUpper mirrors UpperCase (ASCII only, like FPC without locale tables).
-func ASCIIUpper(s string) string { return strings.ToUpper(asciiOnly(s)) }
-
-func asciiOnly(s string) string { return s }
+// ASCIIUpper mirrors UpperCase: only the bytes a-z change; every other byte
+// (including each byte of a multi-byte UTF-8 sequence, and invalid UTF-8)
+// is kept as it is.
+func ASCIIUpper(s string) string {
+	i := 0
+	for i < len(s) && !(s[i] >= 'a' && s[i] <= 'z') {
+		i++
+	}
+	if i == len(s) {
+		return s
+	}
+	b := []byte(s)
+	for ; i < len(b); i++ {
+		if b[i] >= 'a' && b[i] <= 'z' {
+			b[i] -= 'a' - 'A'
+		}
+	}
+	return string(b)
+}
 
 // Pos mirrors Pascal pos(): 1-based index or 0.
 func Pos(sub, s string) int { return strings.Index(s, sub) + 1 }

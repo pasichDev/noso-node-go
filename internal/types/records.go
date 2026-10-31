@@ -54,16 +54,19 @@ type Resumen struct {
 	Block     int32
 	BlockHash string // String[32]
 	SumHash   string // String[32]
+	raw       []byte // stale ShortString tails, see Summary
 }
 
 // DecodeResumen decodes a 70-byte record.
 func DecodeResumen(b []byte) Resumen {
-	return Resumen{codec.I32(b), codec.GetShort(b[4:], 32), codec.GetShort(b[37:], 32)}
+	return Resumen{Block: codec.I32(b), BlockHash: codec.GetShort(b[4:], 32), SumHash: codec.GetShort(b[37:], 32),
+		raw: append([]byte(nil), b[:ResumenSize]...)}
 }
 
 // Encode returns the 70-byte record.
 func (r Resumen) Encode() []byte {
 	b := make([]byte, ResumenSize)
+	copy(b, r.raw)
 	codec.PutI32(b, r.Block)
 	codec.PutShort(b[4:], 32, r.BlockHash)
 	codec.PutShort(b[37:], 32, r.SumHash)
@@ -86,6 +89,7 @@ type BlockHeader struct {
 	AccountMiner  string // String[40]
 	MinerFee      int64
 	Reward        int64
+	raw           []byte // stale ShortString tails, see Summary
 }
 
 // DecodeHeader decodes a 368-byte header.
@@ -97,13 +101,14 @@ func DecodeHeader(b []byte) BlockHeader {
 		TargetHash: codec.GetShort(b[40:], 32), Solution: codec.GetShort(b[73:], 200),
 		LastBlockHash: codec.GetShort(b[274:], 32), NxtBlkDiff: codec.I32(b[307:]),
 		AccountMiner: codec.GetShort(b[311:], 40), MinerFee: codec.I64(b[352:]),
-		Reward: codec.I64(b[360:]),
+		Reward: codec.I64(b[360:]), raw: append([]byte(nil), b[:HeaderSize]...),
 	}
 }
 
 // Encode returns the 368-byte header.
 func (h BlockHeader) Encode() []byte {
 	b := make([]byte, HeaderSize)
+	copy(b, h.raw)
 	codec.PutI64(b[0:], h.Number)
 	codec.PutI64(b[8:], h.TimeStart)
 	codec.PutI64(b[16:], h.TimeEnd)
@@ -139,6 +144,18 @@ type Order struct {
 	AmmountTrf int64
 	Signature  string // String[120]
 	TrfrID     string // String[64]
+	raw        []byte // stale ShortString tails, see Summary
+}
+
+// AssignSender sets Sender the way a Pascal assignment to the packed record
+// does: the shorter value overwrites the front of the field and the old
+// characters stay behind it in the stored record (mpblock.pas:199,212,227
+// assign the 20-34 character address over the 88 character public key, so
+// the block file keeps the key tail). The current record content, as it
+// would be written now, becomes the base of the stale bytes.
+func (o *Order) AssignSender(addr string) {
+	o.raw = o.Encode()
+	o.Sender = codec.Truncate(addr, 120)
 }
 
 // Normalize truncates every string field to its ShortString capacity.
@@ -162,13 +179,14 @@ func DecodeOrder(b []byte) Order {
 		Sender: codec.GetShort(b[157:], 120), Address: codec.GetShort(b[278:], 40),
 		Receiver: codec.GetShort(b[319:], 40), AmmountFee: codec.I64(b[360:]),
 		AmmountTrf: codec.I64(b[368:]), Signature: codec.GetShort(b[376:], 120),
-		TrfrID: codec.GetShort(b[497:], 64),
+		TrfrID: codec.GetShort(b[497:], 64), raw: append([]byte(nil), b[:OrderSize]...),
 	}
 }
 
 // Encode returns the 562-byte record.
 func (o Order) Encode() []byte {
 	b := make([]byte, OrderSize)
+	copy(b, o.raw)
 	codec.PutI32(b[0:], o.Block)
 	codec.PutShort(b[4:], 64, o.OrderID)
 	codec.PutI32(b[69:], o.OrderLines)
@@ -255,16 +273,20 @@ func (w Wallet) Encode() []byte {
 type MNLock struct {
 	Address string // String[32]
 	Expire  int32
+	raw     []byte // padding and stale address tail, see Summary
 }
 
 // DecodeMNLock decodes a 40-byte record.
 func DecodeMNLock(b []byte) MNLock {
-	return MNLock{codec.GetShort(b[0:], 32), codec.I32(b[36:])}
+	return MNLock{Address: codec.GetShort(b[0:], 32), Expire: codec.I32(b[36:]),
+		raw: append([]byte(nil), b[:MNLockSize]...)}
 }
 
-// Encode returns the 40-byte record (padding bytes are zero).
+// Encode returns the 40-byte record. Padding bytes and the tail of a
+// shortened address are kept from the decoded record, zero for a new one.
 func (m MNLock) Encode() []byte {
 	b := make([]byte, MNLockSize)
+	copy(b, m.raw)
 	codec.PutShort(b[0:], 32, m.Address)
 	codec.PutI32(b[36:], m.Expire)
 	return b

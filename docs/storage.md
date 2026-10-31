@@ -74,8 +74,10 @@ deterministic: a header only, no tails (see consensus).
 
 `Hash` String[40] @0, `Custom` String[40] @41, `PublicKey` String[255] @82,
 `PrivateKey` String[255] @338, `Balance`, `Pending`, `Score`, `LastOP` int64
-@594, 602, 610, 618. Keys are Base64 text. **The private keys are stored in
-clear text**, as in the original; protect the file.
+@594, 602, 610, 618. Keys are Base64 text. In `wallet.pkw` (the original
+format, used only with `-insecure-plain-wallet` or for export) **the private
+keys are stored in clear text**; the default file `wallet.enc` holds the same
+records encrypted (see below).
 
 ## nosocfg.psk
 
@@ -89,7 +91,8 @@ project payments (`block,source,target,amount:`). The node edits it with the
 
 `int32 block, int32 lockedCount, int32 psoCount`, then `lockedCount` x 40 byte
 records (`String[32]` + 3 padding bytes + int32 expire block; unpacked record),
-then PSO entries: `uint16 mode`, `string hash`, `string owner`, `uint32 expire`,
+then PSO entries: `uint16 mode`, `string hash`, `string owner`, `int32 expire`
+(a DWord in the record, read as Integer like the original),
 `string members`, `string params`, where `string` is a `uint16` length plus
 bytes. A masternode that is paid is locked for 2016 blocks.
 
@@ -111,9 +114,13 @@ in place). The resulting bytes are identical.
 
 * `wallet.enc` replaces `wallet.pkw`: `NOSOWLT1`, Argon2id parameters, salt,
   nonce, then AES-256-GCM over the same 626-byte records (header as
-  associated data), mode 0600. An existing `wallet.pkw` is migrated on first
-  start with a passphrase, then zeroed and removed. `-insecure-plain-wallet`
-  keeps the original format.
+  associated data), mode 0600. An existing `wallet.pkw` is migrated on the
+  first start with a passphrase and is **kept**: the migration is verified by
+  a full read-back and key check, and nothing is deleted automatically (a
+  mistyped passphrase must not cost the keys; to redo it, move `wallet.enc`
+  away). Read-only commands never migrate. `-insecure-plain-wallet` uses the
+  original format only, ignores a passphrase, and is refused while a
+  `wallet.enc` exists. `expwallet` writes a true clear-text `.pkw`.
 * New small files: `cfg.seq`, `directive.seq` (last accepted sequence numbers)
   and `nosocfg.sig` (the signature of the current configuration).
 * File hashes shown in pings and statuses are `IDHash` values (see crypto).

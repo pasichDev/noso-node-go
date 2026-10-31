@@ -57,13 +57,20 @@ func (h *Headers) Create() bool {
 func (h *Headers) Add(block int64, blockHash, sumHash string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	f, err := os.OpenFile(h.path, os.O_RDWR|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(h.path, os.O_RDWR, 0o644)
 	if err != nil {
 		return false
 	}
 	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	// seek(file, filesize(file)) counts whole records: after a partial last
+	// record the new one is written at the record boundary, over the partial.
+	off := st.Size() / types.ResumenSize * types.ResumenSize
 	// COMPAT: BlockNumber is Int64 but the record field is a 32-bit integer.
-	_, err = f.Write(types.Resumen{Block: int32(block), BlockHash: blockHash, SumHash: sumHash}.Encode())
+	_, err = f.WriteAt(types.Resumen{Block: int32(block), BlockHash: blockHash, SumHash: sumHash}.Encode(), off)
 	return err == nil
 }
 

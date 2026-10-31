@@ -34,38 +34,142 @@ func EncodeBase64(b []byte) string {
 	return sb.String()
 }
 
-// DecodeBase64 mirrors base64.DecodeStringBase64(s) in its default,
-// non-strict (MIME) mode: characters outside the alphabet are skipped and
-// decoding stops at the first '='. A trailing group of 2 or 3 characters
-// yields 1 or 2 bytes, a single leftover character is dropped.
+// b64Dec is DecTable of fpc base64.pp: value 0-63, b64PC for '=' and b64NA
+// for every other byte.
+const (
+	b64NA = 85
+	b64PC = 255
+)
+
+func b64Val(c byte) byte {
+	if c == '=' {
+		return b64PC
+	}
+	if v := strings.IndexByte(b64Alphabet, c); v >= 0 {
+		return byte(v)
+	}
+	return b64NA
+}
+
+// DecodeBase64 reproduces base64.DecodeStringBase64(s) of FPC 3.2.x in its
+// default MIME mode, statement by statement from fcl-base base64.pp
+// (DecodeStringBase64, TBase64DecodingStream.GetSize and .Read): the input is
+// first padded with '=' to a multiple of 4 (counting every byte, junk
+// included); the output size comes from GetSize, which counts alphabet
+// characters up to the first '=' (scanning in 1024 byte chunks, like the
+// original); the bytes then come from Read, which skips characters outside
+// the alphabet and ends a block at the first '='. Examples derived by hand:
+// "QUJDQUI*" gives "ABC" (the junk character leaves a trailing group that
+// GetSize does not count), "QUI" gives "AB".
 //
-// UNVERIFIED: the FPC unit is not part of the source tree and fpc is not
-// available, so this follows the documented MIME-mode behaviour.
+// UNVERIFIED against a run: FPC is not installed. One uncertainty: if the
+// computed size is 0, TStream.CopyFrom may call Seek on the decoder, which
+// raises in FPC; here an empty result is returned.
 func DecodeBase64(s string) []byte {
-	var out []byte
-	var acc uint32
-	n := 0
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c == '=' {
+	if len(s) == 0 {
+		return []byte{}
+	}
+	sd := s
+	for len(sd)%4 > 0 {
+		sd += "="
+	}
+	size := b64MimeSize(sd)
+	return b64Read(sd, size)
+}
+
+// b64MimeSize is TBase64DecodingStream.GetSize in bdmMIME.
+func b64MimeSize(sd string) int64 {
+	var result int64
+	var c byte
+	for pos := 0; ; {
+		end := pos + 1024
+		if end > len(sd) {
+			end = len(sd)
+		}
+		chunk := sd[pos:end]
+		pos = end
+		for i := 0; i < len(chunk); i++ {
+			c = chunk[i]
+			if c == '=' {
+				break // leaves only the for loop; the repeat goes on
+			}
+			if b64Val(c) != b64NA {
+				result++
+			}
+		}
+		if len(chunk) == 0 {
 			break
 		}
-		v := strings.IndexByte(b64Alphabet, c)
-		if v < 0 {
-			continue
-		}
-		acc = acc<<6 | uint32(v)
-		n++
-		if n == 4 {
-			out = append(out, byte(acc>>16), byte(acc>>8), byte(acc))
-			acc, n = 0, 0
-		}
 	}
-	switch n {
-	case 2:
-		out = append(out, byte(acc>>4))
-	case 3:
-		out = append(out, byte(acc>>10), byte(acc>>2))
+	if c == '=' {
+		if result%4 <= 1 {
+			return (result / 4) * 3
+		}
+		return (result/4)*3 + result%4 - 1
+	}
+	return (result / 4) * 3
+}
+
+// b64Read is one TBase64DecodingStream.Read(Count=size) in bdmMIME, after
+// GetSize has set DecodedSize.
+func b64Read(sd string, size int64) []byte {
+	out := []byte{}
+	decoded := size
+	count := size
+	var curPos int64
+	if count > decoded-curPos {
+		count = decoded - curPos
+	}
+	if count <= 0 {
+		return out
+	}
+	var buf [3]byte
+	bufPos := 3
+	src := 0
+	for {
+		if bufPos > 2 {
+			bufPos = 0
+			var rb [4]byte
+			ok := 0
+			for ok < 4 {
+				if src >= len(sd) { // HaveRead < ToRead: end of input
+					break
+				}
+				b := b64Val(sd[src])
+				src++
+				if b != b64NA {
+					rb[ok] = b
+					ok++
+				}
+			}
+			// positions ok..3 stay 0 (padded with zeros)
+			end := func(n int64) {
+				decoded = n
+				if curPos+count > decoded {
+					count = decoded - curPos
+				}
+			}
+			switch {
+			case ok == 0:
+				end(curPos)
+			case rb[0] == b64PC || rb[1] == b64PC:
+				end(curPos)
+			case rb[2] == b64PC:
+				end(curPos + 1)
+			case rb[3] == b64PC:
+				end(curPos + 2)
+			}
+			buf[0] = byte(int(rb[0])<<2 | int(rb[1])>>4)
+			buf[1] = byte((int(rb[1])&15)<<4 | int(rb[2])>>2)
+			buf[2] = byte((int(rb[2])&3)<<6 | int(rb[3]))
+		}
+		if count <= 0 {
+			break
+		}
+		out = append(out, buf[bufPos])
+		bufPos++
+		curPos++
+		count--
 	}
 	return out
 }

@@ -96,7 +96,7 @@ func TestOrderStringRoundTrip(t *testing.T) {
 		t.Fatal(line)
 	}
 	got, ok := ParseOrder(line)
-	if !ok || got != o {
+	if !ok || !bytes.Equal(got.Encode(), o.Encode()) || got.OrderID != o.OrderID {
 		t.Fatalf("%v %+v", ok, got)
 	}
 	// FIX(L-08): over-long fields are rejected instead of truncated.
@@ -120,7 +120,7 @@ func TestHeaderLayout(t *testing.T) {
 		TargetHash: "T", Solution: "S", LastBlockHash: "L", NxtBlkDiff: 7, AccountMiner: "M",
 		MinerFee: 9, Reward: 11}
 	b := h.Encode()
-	if DecodeHeader(b) != h {
+	if !bytes.Equal(DecodeHeader(b).Encode(), b) || DecodeHeader(b).Reward != h.Reward {
 		t.Fatal("header round trip")
 	}
 	if b[40] != 1 || b[41] != 'T' || b[73] != 1 || b[274] != 1 || b[311] != 1 {
@@ -155,4 +155,54 @@ func FuzzDecode(f *testing.F) {
 		DecodeResumen(pad(ResumenSize))
 		ParseOrder(string(b))
 	})
+}
+
+// Item 5 of the rewrite review: the stale tail of a shortened ShortString
+// survives in Order, BlockHeader, Resumen and MNLock like in Summary, and a
+// Pascal style assignment of the address over the public key keeps the key
+// tail in the Sender bytes (mpblock.pas:199,212,227). Layouts are derived
+// from the packed record declarations, not from a Pascal run.
+func TestShortStringTailsPreservedEverywhere(t *testing.T) {
+	raw := make([]byte, OrderSize)
+	copy(raw[157:], "\x0aABCDEFGHIJ") // Sender, length 10
+	o := DecodeOrder(raw)
+	o.Sender = "XY"
+	b := o.Encode()
+	if b[157] != 2 || string(b[158:160]) != "XY" || string(b[160:167]) != "CDEFGHI" {
+		t.Fatalf("order tail lost: %q", b[157:170])
+	}
+	n := Order{Sender: "PUBLICKEYPUBLICKEY", Address: "NADDR"}
+	n.AssignSender(n.Address)
+	nb := n.Encode()
+	if nb[157] != 5 || string(nb[158:163]) != "NADDR" || string(nb[163:176]) != "CKEYPUBLICKEY" {
+		t.Fatalf("AssignSender: %q", nb[157:180])
+	}
+	if got := DecodeOrder(nb); got.Sender != "NADDR" || !bytes.Equal(got.Encode(), nb) {
+		t.Fatal("round trip of an order with a stale tail")
+	}
+	hraw := make([]byte, HeaderSize)
+	copy(hraw[311:], "\x08ABCDEFGH")
+	h := DecodeHeader(hraw)
+	h.AccountMiner = "Z"
+	if hb := h.Encode(); hb[311] != 1 || string(hb[312:316]) != "ZBCD" {
+		t.Fatal("header tail lost")
+	}
+	rraw := make([]byte, ResumenSize)
+	copy(rraw[37:], "\x06ABCDEF")
+	r := DecodeResumen(rraw)
+	r.SumHash = "Q"
+	if rb := r.Encode(); string(rb[38:42]) != "QBCD" {
+		t.Fatal("resumen tail lost")
+	}
+	mraw := make([]byte, MNLockSize)
+	copy(mraw[0:], "\x05ABCDE")
+	mraw[34] = 0x7f // padding byte
+	m := DecodeMNLock(mraw)
+	m.Address = "A"
+	if mb := m.Encode(); string(mb[2:6]) != "BCDE" || mb[34] != 0x7f {
+		t.Fatal("mnlock tail or padding lost")
+	}
+	if !bytes.Equal(DecodeMNLock(mraw).Encode(), mraw) {
+		t.Fatal("mnlock round trip")
+	}
 }

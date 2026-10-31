@@ -121,22 +121,24 @@ func encodeDigits(v *big.Int, alphabet string) string {
 	return string(out)
 }
 
-// hexToBytes mirrors TConverters.ConvertHexStringToBytes for an even
-// length string; ok=false where Pascal raises.
-func hexToBytes(s string) ([]byte, bool) {
-	if len(s)%2 != 0 {
-		return nil, false
-	}
+// hexToBytes mirrors TConverters.ConvertHexStringToBytes (ClpConverters.pas)
+// on top of FPC's HexToBin (classes/util.inc): every '-' is removed first;
+// the result has len/2 bytes (an odd trailing character is ignored); pairs
+// are decoded up to the first character that is not a hex digit, and the
+// remaining bytes stay 0. It never fails: invalid text does not raise in
+// Free Pascal (FIX of a wrong assumption; see docs/compatibility.md).
+func hexToBytes(s string) []byte {
+	s = strings.ReplaceAll(s, "-", "")
 	out := make([]byte, len(s)/2)
-	for i := 0; i < len(out); i++ {
+	for i := range out {
 		h := hexVal(s[2*i])
 		l := hexVal(s[2*i+1])
 		if h < 0 || l < 0 {
-			return nil, false
+			break
 		}
 		out[i] = byte(h<<4 | l)
 	}
-	return out, true
+	return out
 }
 
 func hexVal(c byte) int {
@@ -207,11 +209,7 @@ func B16ToB10(hexs string) string {
 	if len(s)%2 != 0 {
 		s = "0" + s
 	}
-	b, ok := hexToBytes(s)
-	if !ok {
-		return "0"
-	}
-	return new(big.Int).SetBytes(b).String()
+	return new(big.Int).SetBytes(hexToBytes(s)).String()
 }
 
 // B16ToB36 mirrors nosocrypto.pas:554-573 with EncodeBaseN (lines 103-173).
@@ -226,10 +224,7 @@ func B16ToB36(hexs string) string {
 	if len(s)%2 != 0 {
 		s = "0" + s
 	}
-	b, ok := hexToBytes(s)
-	if !ok {
-		return "0"
-	}
+	b := hexToBytes(s)
 	nz := 0
 	for nz < len(b) && b[nz] == 0 {
 		nz++
@@ -250,11 +245,7 @@ func B16ToB58(hexs string) string {
 	if len(s)%2 != 0 {
 		s = "0" + s
 	}
-	b, ok := hexToBytes(s)
-	if !ok {
-		return "1"
-	}
-	return base58Encode(bigToByteArrayUnsigned(bigFromSignedBytes(b)))
+	return base58Encode(bigToByteArrayUnsigned(bigFromSignedBytes(hexToBytes(s))))
 }
 
 // B16ToB58Lite1_60 is identical to B16ToB58 (nosocrypto.pas:594-611).

@@ -43,15 +43,15 @@ Status: **Confirmed** means established by reading the code path. **Suspected** 
 | C-01 | Critical | Forged network configuration on a 20-bit MD5 prefix | Confirmed | Full fix yes, stopgap no |
 | C-02 | Critical | Unsolicited `BLOCKZIP` file write in node directory | Confirmed (escape from directory: suspected) | No |
 | C-03 | Critical | Downloaded blocks, summary and headers not validated | Confirmed | Partly | Network side fixed: state files accepted only against the seeds' full-hash vote (majority of all configured seeds), blocks must hash to their header record; block validation and sealing are in `node` (Agent B), not covered here. Tests `TestForgedSummaryWithMatchingPrefixRefused`, `TestBlocksBoundToHeaders`. |
-| C-04 | Critical | Replay of signed transfers | Confirmed | Yes |
-| C-05 | Critical | `amount + fee` overflow mints coins | Confirmed | Yes |
-| C-06 | Critical | `CUSTOM` fee mints coins | Confirmed | Yes |
-| C-07 | Critical | Forged masternode checks divert rewards | Confirmed | Yes |
+| C-04 | Critical | Replay of signed transfers | Confirmed | Yes | Fixed: `TrfrID` derived from all signed fields, checked in every received block; replay closed by the order time window plus the previous-block id test. `TestC04_TrfrIDBoundAndReplay`, `TestRW_StateRulesEnforced`. |
+| C-05 | Critical | `amount + fee` overflow mints coins | Confirmed | Yes | Fixed: amounts range and overflow checked everywhere; shares use 128-bit products (`consensus.ApplyBP`, `Shares`), the masternode check no longer multiplies (16384 x 2^50 wrapped). `TestC05_Overflow`, `TestRW_MNShareChecked`. |
+| C-06 | Critical | `CUSTOM` fee mints coins | Confirmed | Yes | Fixed: exact fee, amount 0, valid unused alias (unique across blocks); the pool check uses the fee of the block the order will land in (161999 boundary). `TestC06_CustomFee`, `TestRW_AliasAcrossBlocks`. |
+| C-07 | Critical | Forged masternode checks divert rewards | Confirmed | Yes | Fixed (node side): validators registered per IP; every received masternode report is challenged with `MNVER <nonce>` before it is listed, so verification is on by default. `TestMNChecksSecurity`, `TestC07_ReportNeedsAnsweringIP`. |
 | C-08 | Critical | Auto-update runs unsigned code | Confirmed | No |
-| H-01 | High | Masternode reports unauthenticated, first report unchecked | Confirmed | Yes |
+| H-01 | High | Masternode reports unauthenticated, first report unchecked | Confirmed | Yes | Fixed: reports signed by the funds key or, for cold funds, by the sign key under a one-time delegation; funds check applies to every report. `TestMNReportSecurity`, `TestRW_ColdFundsReport`. |
 | H-02 | High | Admin directives replayable | Confirmed | No |
 | H-03 | High | One admin key is global root | Confirmed (design) | Yes |
-| H-04 | High | Plurality vote with no quorum on 20-bit values | Confirmed | Partly |
+| H-04 | High | Plurality vote with no quorum on 20-bit values | Confirmed | Partly | Partly fixed: quorum over all configured seeds, one vote per host, cumulative reorganisation limit (20 below the highest tip ever reached), no block is deleted on a vote. Not fixed: votes are still 5-character prefixes; `SeedKeys` stays empty by default (status is only a hint). `TestRW_ReorgLimitCumulative`, `TestRW_CorruptBelowHorizonStops`. |
 | H-05 | High | Headers corruption forces desync | Confirmed | No | Fixed: `HEADUPDATE` is built on a copy and stored only if it has the voted full hash and agrees with local blocks. `TestHeadUpdateVerifiedBeforeChange`. |
 | H-06 | High | `MNFILE` and `PSOSFILE` overwrite state | Confirmed | Partly | Fixed: both need the voted full hash. `TestMNFileNeedsFullHash`, `TestNoFullVoteNoFile`. |
 | H-07 | High | Unsigned fields, ambiguous signed text | Confirmed | Yes |
@@ -59,7 +59,7 @@ Status: **Confirmed** means established by reading the code path. **Suspected** 
 | H-09 | High | RPC unauthenticated and reachable by CSRF | Confirmed | No |
 | H-10 | High | Keys in clear, in logs and in crash reports | Confirmed | No | Partly fixed (cli/rpc/nosod side): RPCSaveNew writes no plaintext files, exports are 0600 and exclusive with a warning, passphrase minimum 8 on creation. Wallet file encryption, migration and the split `-insecure-plain-wallet` state are storage/node (Agent A/B). |
 | H-11 | High | Stalled or oversized transfers block sync | Confirmed | No | Fixed: transfers are read outside the heartbeat lock with an idle and a total deadline, files are sent from a goroutine of their own, one per slot. `TestStalledTransferDoesNotBlockTick`, `TestSlowReaderDoesNotBlockTick`. |
-| M-01 | Medium | Alias rules client-side only, order type unchecked | Confirmed | Yes |
+| M-01 | Medium | Alias rules client-side only, order type unchecked | Confirmed | Yes | Fixed: receiver-side alias rules, only `TRFR`/`CUSTOM`/`SNDGVT` in blocks, alias unique across blocks. `TestM01_OrderType`, `TestRW_AliasAcrossBlocks`. |
 | M-02 | Medium | TLS verification and bootstrap trust | Partly suspected | No |
 | M-03 | Medium | Time from one unauthenticated NTP reply | Confirmed | No |
 | M-04 | Medium | Peers set a node's own IP | Confirmed | No |
@@ -68,16 +68,16 @@ Status: **Confirmed** means established by reading the code path. **Suspected** 
 | M-07 | Medium | Main-thread work with no peer budget | Confirmed | No | Fixed: per-command line caps, per-slot byte and `$MNREPO` budgets, byte-bounded incoming queue. `TestLineAndByteBudgets`. Retention inside `node/mn.go` is Agent B. |
 | M-08 | Medium | Costly requests with no rate limit | Confirmed | No |
 | M-09 | Medium | Unchecked binary file parsing | Confirmed | No |
-| M-10 | Medium | Block content depends on local mempool | Confirmed | Yes |
-| M-11 | Medium | Build and replay produce different summaries | Confirmed (hash effect inferred) | No |
-| M-12 | Medium | Non-atomic state, ignored write errors | Confirmed | No |
+| M-10 | Medium | Block content depends on local mempool | Confirmed | Yes | Reworked: proof-of-authority proposers with a sealed block, heaviest valid branch with a tie rule on the tip hash, no deletion on a vote. Trust limits (censoring, equivocation inside 20 blocks) in `docs/consensus.md`. `TestM10_MinorityProposerKeepsItsBlocks`, `TestRW_ForkChoiceConverges`. |
+| M-11 | Medium | Build and replay produce different summaries | Confirmed (hash effect inferred) | No | Fixed: one state transition for builder, validator and replay. `TestRW_BuilderNeverExceedsValidator`. |
+| M-12 | Medium | Non-atomic state, ignored write errors | Confirmed | No | Fixed: state snapshot restored on any failed build step, pool and masternode tables consumed only after success. `TestRW_FailedWriteRetryPaysOnce`, `TestM12_WriteFailureStopsBuild`. |
 | M-13 | Medium | SHA-1, MD5, signature malleability | Confirmed | Yes |
-| M-14 | Medium | GVT state and rule problems | Confirmed | Partly |
+| M-14 | Medium | GVT state and rule problems | Confirmed | Partly | Fixed: owner key authorises, ownership checked before the debit, canonical reference. `TestM14_GVTOwner`. |
 | M-15 | Medium | Unchecked indexes and casts | Confirmed | No |
 | M-16 | Medium | Unpinned CI, binary blobs | Confirmed | No |
-| L-01 | Low | Address checks accept unspendable forms | Confirmed | Partly |
+| L-01 | Low | Address checks accept unspendable forms | Confirmed | Partly | Partly fixed: `M` addresses and over-long names refused; the sum checksum is kept (swapped characters still pass). `TestL01_L08_Receivers`. |
 | L-02 | Low | `IsValidIP` accepts private ranges | Confirmed | Yes |
-| L-03 | Low | Lock and result errors | Confirmed | No |
+| L-03 | Low | Lock and result errors | Confirmed | No | Fixed: unparsable orders are errors, first error code kept. `TestL03_ResultsAtEntry`. |
 | L-04 | Low | Global rate limits | Confirmed | No |
 | L-05 | Low | Certificates have no audience | Confirmed | No |
 | L-06 | Low | `GetSupply` wrong after block 210000 | Confirmed | No |
