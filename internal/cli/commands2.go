@@ -2,6 +2,7 @@ package cli
 
 import (
 	"crypto/sha256"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -136,18 +137,46 @@ func cmdShowWallet(d *Dispatcher, l string) {
 	d.log("%s NOSO", i2c(walletBalance(d)))
 }
 
+// cmdExpWallet writes the addresses as a plaintext .pkw file, the format
+// impwallet reads (mpparser.pas:431-448). FIX(finding 11): it used to copy
+// the wallet file, which is ciphertext, and report success. The new file is
+// created exclusively with mode 0600 and the console says that it holds
+// unencrypted private keys; an existing file, in particular the live
+// wallet, is never touched.
 func cmdExpWallet(d *Dispatcher, l string) {
 	dest := strings.ReplaceAll(p(l, 1), "*", " ")
-	if storage.Exists(dest + ".pkw") {
-		d.log("Error: Can not overwrite existing wallets")
+	if dest == "" {
+		d.log("Syntax: expwallet {destination}")
 		return
 	}
-	raw, err := os.ReadFile(d.N.Wallet.Path())
-	if err != nil || os.WriteFile(dest+".pkw", raw, 0o644) != nil {
-		d.log("Failed")
+	if err := ExportWallet(d.N, dest+".pkw"); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			d.log("Error: Can not overwrite existing wallets")
+		} else {
+			d.log("Failed: %v", err)
+		}
 		return
 	}
-	d.log("Wallet saved as %s.pkw", dest)
+	d.log("Wallet saved as %s.pkw (unencrypted private keys: keep the file safe)", dest)
+}
+
+// ExportWallet writes every wallet record to path as a plaintext wallet
+// file. It fails with os.ErrExist rather than overwrite anything.
+func ExportWallet(n *node.Node, path string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	var raw []byte
+	for _, w := range n.Wallet.All() {
+		raw = append(raw, w.Encode()...)
+	}
+	if _, err := f.Write(raw); err != nil {
+		f.Close()
+		_ = os.Remove(path)
+		return err
+	}
+	return f.Close()
 }
 
 func cmdImpWallet(d *Dispatcher, l string) {

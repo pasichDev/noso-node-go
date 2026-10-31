@@ -5,6 +5,8 @@ package cli
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -123,4 +125,21 @@ func Sensitive(line string) bool {
 		return true
 	}
 	return false
+}
+
+// MinPassphrase is the shortest wallet passphrase accepted when an
+// encrypted wallet is created (finding 20: one character was enough).
+const MinPassphrase = 8
+
+// CheckNewPassphrase refuses a short passphrase when opening the data
+// directory would create (or migrate into) a new encrypted wallet. An
+// existing wallet.enc accepts whatever opens it.
+func CheckNewPassphrase(dataDir string, pass []byte) error {
+	if len(pass) == 0 || len(pass) >= MinPassphrase {
+		return nil
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "wallet.enc")); err == nil {
+		return nil
+	}
+	return fmt.Errorf("the wallet passphrase must have at least %d characters", MinPassphrase)
 }

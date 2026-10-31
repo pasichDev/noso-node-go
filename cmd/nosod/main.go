@@ -24,20 +24,46 @@ import (
 	"github.com/pasichDev/noso-node-go/internal/storage"
 )
 
+// options are the command line settings of one daemon run.
+type options struct {
+	data        string
+	seedURL     string
+	passFile    string
+	plainWallet bool
+	noP2P       bool
+	noNTP       bool
+}
+
 func main() {
-	data := flag.String("data", "NOSODATA", "data directory (same layout as the original NOSODATA folder)")
-	seedURL := flag.String("seed-url", "", "https URL of a signed seed list (needs ReleaseKey in advopt.txt); nothing is downloaded without it")
-	passFile := flag.String("wallet-pass-file", "", "file holding the wallet passphrase (or set NOSO_WALLET_PASSPHRASE)")
-	plainWallet := flag.Bool("insecure-plain-wallet", false, "keep private keys unencrypted in wallet.pkw (not recommended)")
-	noP2P := flag.Bool("no-p2p", false, "open the data directory and the RPC server but do not connect to peers")
-	noNTP := flag.Bool("no-ntp", false, "do not query NTP servers at start")
+	var o options
+	flag.StringVar(&o.data, "data", "NOSODATA", "data directory (same layout as the original NOSODATA folder)")
+	flag.StringVar(&o.seedURL, "seed-url", "", "https URL of a signed seed list (needs ReleaseKey in advopt.txt); nothing is downloaded without it")
+	flag.StringVar(&o.passFile, "wallet-pass-file", "", "file holding the wallet passphrase (or set NOSO_WALLET_PASSPHRASE)")
+	flag.BoolVar(&o.plainWallet, "insecure-plain-wallet", false, "keep private keys unencrypted in wallet.pkw (not recommended)")
+	flag.BoolVar(&o.noP2P, "no-p2p", false, "open the data directory and the RPC server but do not connect to peers")
+	flag.BoolVar(&o.noNTP, "no-ntp", false, "do not query NTP servers at start")
 	version := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
 	if *version {
 		fmt.Println(node.MainnetVersion + node.NodeRelease + " (nosod, independent Go implementation)")
 		return
 	}
+	// The signal handler lives across restarts. A restart (console
+	// `restart`, RPC `restart`, `restoreblockchain`) closes everything and
+	// opens the data directory again inside this process: nothing is
+	// executed and no second binary is needed.
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	for run(o, sig) {
+		log.Printf("[console] restarting")
+	}
+}
 
+// run opens the node, serves until a signal or a stop request, closes
+// everything and reports whether a restart was asked for.
+func run(opt options, sig <-chan os.Signal) (restart bool) {
+	data, seedURL, passFile := &opt.data, &opt.seedURL, &opt.passFile
+	plainWallet, noP2P, noNTP := &opt.plainWallet, &opt.noP2P, &opt.noNTP
 	pass, err := walletPassphrase(*passFile)
 	if err != nil {
 		log.Fatalf("wallet passphrase: %v", err)
@@ -69,9 +95,15 @@ func main() {
 	r.Log = logf
 	d := cli.New(n, e, r)
 
-	stop := make(chan bool, 1)
-	d.Quit = func(restart bool) { stop <- restart }
-	r.Restart = func() { stop <- true }
+	stop := make(chan bool, 4)
+	ask := func(restart bool) {
+		select {
+		case stop <- restart:
+		default:
+		}
+	}
+	d.Quit = ask
+	r.Restart = func() { ask(true) }
 	e.CommandHook = func(line string) {
 		if cli.Sensitive(line) { // FIX(H-10): never log key material
 			d.RunTo(line, func(string) {})
@@ -101,27 +133,33 @@ func main() {
 	}
 
 	// Time offset refresh every period (heartbeat: age >= 570, NosoT_LastUpdate+599).
+	quit := make(chan struct{})
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		t := time.NewTicker(10 * time.Minute)
 		defer t.Stop()
-		for range t.C {
-			if !*noNTP {
-				e.UpdateTimeOffset(n.CFG.Param(2))
+		for {
+			select {
+			case <-quit:
+				return
+			case <-t.C:
+				if !*noNTP {
+					e.UpdateTimeOffset(n.CFG.Param(2))
+				}
 			}
 		}
 	}()
 
 	logf("console", "Noso "+node.MainnetVersion+node.NodeRelease+" ready, last block "+codec.IntToStr(n.MyLastBlock())+
 		", data in "+absPath(*data))
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	select {
 	case <-sig:
-	case <-stop:
+	case restart = <-stop:
 	}
 	logf("console", "Closing wallet")
+	close(quit)
+	wg.Wait()
 	_ = n.SaveOptions()
 	r.Stop()
 	if ln != nil {
@@ -130,6 +168,7 @@ func main() {
 	}
 	e.Stop()
 	_ = os.WriteFile(n.Lay.ClosedMarker, nil, 0o644)
+	return restart
 }
 
 func absPath(p string) string {

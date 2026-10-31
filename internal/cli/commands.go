@@ -12,7 +12,6 @@ import (
 	"github.com/pasichDev/noso-node-go/internal/crypto"
 	"github.com/pasichDev/noso-node-go/internal/network"
 	"github.com/pasichDev/noso-node-go/internal/node"
-	"github.com/pasichDev/noso-node-go/internal/storage"
 	"github.com/pasichDev/noso-node-go/internal/types"
 )
 
@@ -91,6 +90,7 @@ func init() {
 		},
 		"DISCONNECT": func(d *Dispatcher, l string) {
 			if d.needNet() {
+				d.E.StopServer() // mpred.pas:413 CloseAllConnections(ServerToo=True)
 				for i := 1; i <= network.MaxConnections; i++ {
 					if d.E.Peer(i).Tipo == "SER" {
 						d.E.CloseSlot(i)
@@ -115,7 +115,7 @@ func init() {
 		},
 		"PEERS": func(d *Dispatcher, l string) {
 			if d.needNet() {
-				d.log("Server list: %d/%d", d.E.IncomingConnections(), d.E.IncomingConnections())
+				d.log("Server list: %d/%d", d.E.OutgoingConnections(), d.E.IncomingConnections())
 			}
 		},
 		"AUTOSERVERON": func(d *Dispatcher, l string) {
@@ -225,8 +225,18 @@ func init() {
 				d.log("Address not found in wallet")
 				return
 			}
-			storage.SaveAddressFile("tempwallet.pkw", d.N.Wallet.At(i))
-			d.log("Address exported to tempwallet.pkw")
+			// created exclusively with mode 0600; it holds a private key
+			f, err := os.OpenFile("tempwallet.pkw", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+			if err != nil {
+				d.log("Can not create tempwallet.pkw (does it exist already?)")
+				return
+			}
+			_, werr := f.Write(d.N.Wallet.At(i).Encode())
+			if f.Close() != nil || werr != nil {
+				d.log("Failed")
+				return
+			}
+			d.log("Address exported to tempwallet.pkw (unencrypted private key: keep the file safe)")
 		},
 		"NEWFROMKEYS": func(d *Dispatcher, l string) {
 			var w types.Wallet
@@ -236,7 +246,7 @@ func init() {
 			d.N.Wallet.Save()
 		},
 		"GETMULTI": cmdGetMulti,
-		"VALIDATE": func(d *Dispatcher, l string) { d.log("%s", boolStr(d.N.Wallet.VerifyOnDisk(p(l, 1)))) },
+		"VALIDATE": func(d *Dispatcher, l string) { d.log("%s", boolStr(d.N.Wallet.IndexOf(p(l, 1)) >= 0)) },
 		"TESTHASH": func(d *Dispatcher, l string) {
 			n := int(codec.StrToIntDef(p(l, 1), 100))
 			ok := 0
