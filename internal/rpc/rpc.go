@@ -243,13 +243,33 @@ func (s *Server) Parse(body string) string { return s.parse(body, false) }
 
 func (s *Server) parse(body string, spend bool) string {
 	var req request
+	var fields map[string]json.RawMessage
 	dec := json.NewDecoder(strings.NewReader(body))
-	if err := dec.Decode(&req); err != nil {
+	if err := dec.Decode(&fields); err != nil {
 		var generic any
 		if json.Unmarshal([]byte(body), &generic) != nil {
 			return ErrorCode(401, -1)
 		}
 		return "" // valid JSON of the wrong shape
+	}
+	// FIX (Low): text after the JSON value is an error (Pascal: 401), and
+	// member names match exactly (encoding/json folds case).
+	if _, err := dec.Token(); err != io.EOF {
+		return ErrorCode(401, -1)
+	}
+	if raw, ok := fields["method"]; ok {
+		_ = json.Unmarshal(raw, &req.Method)
+	}
+	if raw, ok := fields["params"]; ok && string(raw) != "null" {
+		if json.Unmarshal(raw, &req.Params) != nil {
+			return ""
+		}
+		if req.Params == nil {
+			req.Params = []json.RawMessage{}
+		}
+	}
+	if raw, ok := fields["id"]; ok && string(raw) != "null" {
+		req.ID = raw
 	}
 	if req.Method == "" || req.Params == nil || req.ID == nil {
 		return ""
@@ -285,9 +305,13 @@ func (s *Server) dispatch(method, p string) (string, bool) {
 	case "banned":
 		return "banned", true
 	case "restart":
-		if s.Restart != nil {
-			go s.Restart()
+		// A front end that cannot restart itself does not install Restart;
+		// the method then does not exist rather than answering True and
+		// doing nothing (finding 12).
+		if s.Restart == nil {
+			return "", false
 		}
+		go s.Restart()
 		return "restart", true
 	case "getaddressbalance":
 		return s.addressBalance(p), true
@@ -316,7 +340,9 @@ func (s *Server) dispatch(method, p string) (string, bool) {
 	case "getnewaddressfull":
 		return s.newAddressFull(), true
 	case "islocaladdress":
-		if s.N.Wallet.VerifyOnDisk(codec.Parameter(p, 0)) {
+		// The wallet in memory is authoritative; the file may be encrypted
+		// and cannot be parsed as records (finding 10).
+		if s.N.Wallet.IndexOf(codec.Parameter(p, 0)) >= 0 {
 			return "islocaladdress\x7fTrue", true
 		}
 		return "islocaladdress\x7fFalse", true
@@ -367,7 +393,7 @@ func (s *Server) addressBalance(p string) string {
 			a = r.Hash
 		}
 		if a == "" {
-			continue
+			break // an unknown alias ends the list (mprpc.pas:542-564)
 		}
 		var bal, inc, out int64
 		alias, valid := "null", "false"
@@ -529,12 +555,8 @@ func (s *Server) newAddress(p string) string {
 		total = 100
 	}
 	res := fmt.Sprintf("newaddress\x7ftrue\x7f%d\x7f", total)
-	o := s.N.Options()
 	for i := 0; i < total; i++ {
-		w := s.E.NewAddress()
-		if o.RPCSaveNew {
-			storage.SaveAddressFile(s.N.Lay.RPCBakDir+"/"+w.Hash+".pkw", w)
-		}
+		w := s.E.NewAddress() // saved with the wallet, which is encrypted
 		res += w.Hash + "\x7f"
 	}
 	return res
@@ -542,9 +564,6 @@ func (s *Server) newAddress(p string) string {
 
 func (s *Server) newAddressFull() string {
 	w := s.E.NewAddress()
-	if s.N.Options().RPCSaveNew {
-		storage.SaveAddressFile(s.N.Lay.RPCBakDir+"/"+w.Hash+".pkw", w)
-	}
 	priv := ""
 	if s.N.Options().RPCExposeKeys { // FIX(H-09, H-10): keys are not sent over RPC by default
 		priv = w.PrivateKey
