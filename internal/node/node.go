@@ -39,6 +39,7 @@ type Node struct {
 	MNFile  *storage.MNFile
 	PSOs    *storage.PSOs
 	Blocks  *storage.Blocks
+	DB      *storage.BlocksDB
 
 	Opts   storage.Options
 	optsMu sync.Mutex
@@ -104,8 +105,14 @@ func New(root string, fetchSeeds func() string) (*Node, error) {
 		n.Summary.CreateNew(storage.Exists(n.Lay.BlockFile(0)))
 	}
 	n.Summary.CreateIndex()
-	if !storage.Exists(n.Lay.BlocksDB) {
-		_ = os.WriteFile(n.Lay.BlocksDB, nil, 0o644)
+	if n.Opts.BlocksDB {
+		n.DB = storage.OpenBlocksDB(n.Lay.BlocksDB)
+	} else {
+		if !storage.Exists(n.Lay.BlocksDB) {
+			_ = os.WriteFile(n.Lay.BlocksDB, nil, 0o644)
+		}
+		n.DB = storage.OpenBlocksDB(n.Lay.BlocksDB)
+		n.DB.LoadIndex() // Pascal only loads the index when BlocksDB is on; empty otherwise
 	}
 	n.PSOs = storage.OpenPSOs(n.Lay.PSOs)
 	if !storage.Exists(n.Lay.BlockFile(0)) {
@@ -281,3 +288,7 @@ func (n *Node) TimeAgo(stamp int64) string {
 	}
 	return codec.IntToStr(e/31536000) + " Y"
 }
+
+// StorageOptions re-exports storage.Options for callers that only import
+// the node package.
+type StorageOptions = storage.Options

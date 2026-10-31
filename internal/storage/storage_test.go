@@ -325,3 +325,25 @@ func FuzzPSOParse(f *testing.F) {
 		p.parse(raw)
 	})
 }
+
+func TestBlocksDBIndexAndLookup(t *testing.T) {
+	l := tmp(t)
+	bs := NewBlocks(l)
+	o := types.Order{OrderType: "TRFR", OrderID: "ORabc123", Address: "NA", Receiver: "NB", Block: 5}
+	_ = bs.Write(&Block{Header: types.BlockHeader{Number: 5, TrxTotales: 1}, Orders: []types.Order{o}})
+	d := OpenBlocksDB(l.BlocksDB)
+	d.Update(bs)
+	if d.Records() != 1 || d.LastBlock() != 5 {
+		t.Fatalf("records %d last %d", d.Records(), d.LastBlock())
+	}
+	if d.BlockFromOrder(bs, "ORabc123") != 5 || d.BlockFromOrder(bs, "ORnothere") != -1 {
+		t.Fatal("lookup")
+	}
+	if ix := DBIndex("ORabc123"); ix < 0 || ix >= 100000 {
+		t.Fatal(ix)
+	}
+	d2 := OpenBlocksDB(l.BlocksDB)
+	if len(d2.Blocks("ORabc123")) != 1 {
+		t.Fatal("index reload")
+	}
+}
