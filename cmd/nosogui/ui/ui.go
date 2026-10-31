@@ -27,6 +27,7 @@ import (
 	"github.com/pasichDev/noso-node-go/internal/network"
 	"github.com/pasichDev/noso-node-go/internal/node"
 	"github.com/pasichDev/noso-node-go/internal/rpc"
+	"github.com/pasichDev/noso-node-go/internal/storage"
 )
 
 // App ties the windows to a running node.
@@ -61,8 +62,20 @@ type App struct {
 	eventsLog *widget.Entry
 	excepLog  *widget.Entry
 
+	tabs    *container.AppTabs
+	monTabs *container.AppTabs
+	optTabs *container.AppTabs
+	// widgets the tests drive
+	sendDest, sendAmount *widget.Entry
+	sendBtn, confBtn     *widget.Button
+	consoleIn            *widget.Entry
+	hideCheck            *widget.Check
+	headless             bool          // tests: no peer-to-peer engine, no NTP
+	done                 chan struct{} // closed by shutdown; stops the refresh loop
+	closing              sync.Once
+
 	donate   func()
-	selAddr  int
+	selAddr  string // hash of the selected wallet address
 	selGVT   int
 	dataRows [][]string
 	slotRows [][]string
@@ -74,13 +87,11 @@ type App struct {
 
 // Run starts the application: passphrase prompt, node start, main window.
 func Run() {
-	a := &App{fa: app.NewWithID("io.github.pasichdev.noso-node-go")}
-	a.dataDir = os.Getenv("NOSO_DATA")
-	if a.dataDir == "" {
-		a.dataDir = "NOSODATA"
+	dir := os.Getenv("NOSO_DATA")
+	if dir == "" {
+		dir = "NOSODATA"
 	}
-	a.win = a.fa.NewWindow("Noso " + node.MainnetVersion + node.NodeRelease)
-	a.win.Resize(fyne.NewSize(1000, 680))
+	a := newApp(app.NewWithID("io.github.pasichdev.noso-node-go"), dir)
 	a.showStartup()
 	// Unattended start (used for automated checks): the passphrase comes from
 	// the environment and the initial tab from NOSO_GUI_TAB.
@@ -92,6 +103,14 @@ func Run() {
 		}()
 	}
 	a.win.ShowAndRun()
+}
+
+// newApp creates the application object and its window on fa.
+func newApp(fa fyne.App, dataDir string) *App {
+	a := &App{fa: fa, dataDir: dataDir, done: make(chan struct{})}
+	a.win = fa.NewWindow("Noso " + node.MainnetVersion + node.NodeRelease)
+	a.win.Resize(fyne.NewSize(1000, 680))
+	return a
 }
 
 // showStartup mirrors FormInicio: a progress list and the wallet passphrase.
@@ -122,6 +141,9 @@ func (a *App) showStartup() {
 // startNode mirrors StartProgram (masterpaskalform.pas:1648-1742).
 func (a *App) startNode(pass []byte, plain bool, step func(string)) error {
 	step("Opening data directory " + a.dataDir)
+	if err := cli.CheckNewPassphrase(a.dataDir, pass); err != nil { // finding 20
+		return err
+	}
 	n, err := node.NewWithConfig(a.dataDir, node.Config{WalletPassphrase: pass, InsecurePlainWallet: plain})
 	if err != nil {
 		return err
@@ -144,19 +166,45 @@ func (a *App) startNode(pass []byte, plain bool, step func(string)) error {
 	a.r.Log = logf
 	a.d = cli.New(n, e, a.r)
 	a.d.Echo = true
-	a.d.Quit = func(restart bool) { fyne.Do(func() { a.fa.Quit() }) }
-	a.r.Restart = func() { fyne.Do(func() { a.fa.Quit() }) }
+	// The GUI cannot restart itself without re-executing a binary, which
+	// this implementation never does (C-08). A restart request is answered
+	// in the console and the RPC method is not offered.
+	a.d.Quit = func(restart bool) {
+		if restart {
+			a.appendLog("console", "The GUI cannot restart itself: close it and start it again.")
+			return
+		}
+		fyne.Do(func() { a.shutdown() })
+	}
+	a.r.Restart = nil
 	e.CommandHook = func(line string) { a.runCommand(line) }
 	step("✓ GUI initialized")
-	e.UpdateTimeOffset(n.CFG.Param(2))
-	step("✓ Mainnet time synced")
-	e.Start()
+	if !a.headless {
+		e.UpdateTimeOffset(n.CFG.Param(2))
+		step("✓ Mainnet time synced")
+		go a.ntpLoop()
+		e.Start()
+	}
 	step("Noso is ready")
 	o := n.Options()
 	if o.RPCAuto {
 		_ = a.r.Start(o.RPCPort)
 	}
 	return nil
+}
+
+// ntpLoop refreshes the clock offset every period, like nosod.
+func (a *App) ntpLoop() {
+	t := time.NewTicker(10 * time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-a.done:
+			return
+		case <-t.C:
+			a.e.UpdateTimeOffset(a.n.CFG.Param(2))
+		}
+	}
 }
 
 func (a *App) appendLog(ch, msg string) {
@@ -208,7 +256,7 @@ func (a *App) info(s string) {
 func (a *App) buildMain() {
 	a.status = widget.NewLabel("")
 	a.infoLabel = widget.NewLabel("")
-	tabs := container.NewAppTabs(
+	a.tabs = container.NewAppTabs(
 		container.NewTabItemWithIcon("Wallet", theme.AccountIcon(), a.walletTab()),
 		container.NewTabItemWithIcon("Console", theme.ComputerIcon(), a.consoleTab()),
 		container.NewTabItemWithIcon("Monitor", theme.InfoIcon(), a.monitorTab()),
@@ -216,31 +264,46 @@ func (a *App) buildMain() {
 		container.NewTabItemWithIcon("GVTs", theme.ListIcon(), a.gvtTab()),
 		container.NewTabItemWithIcon("Options", theme.SettingsIcon(), a.optionsTab()),
 	)
-	if t := codec.StrToIntDef(os.Getenv("NOSO_GUI_TAB"), 0); t > 0 && int(t) < len(tabs.Items) {
-		tabs.SelectIndex(int(t))
+	if t := codec.StrToIntDef(os.Getenv("NOSO_GUI_TAB"), 0); t > 0 && int(t) < len(a.tabs.Items) {
+		a.tabs.SelectIndex(int(t))
 	}
 	a.win.SetMainMenu(fyne.NewMainMenu(fyne.NewMenu("File",
 		fyne.NewMenuItem("Import wallet...", a.importWallet),
 		fyne.NewMenuItem("Export wallet...", a.exportWallet),
 		fyne.NewMenuItemSeparator(),
-		fyne.NewMenuItem("Restart", func() { a.runCommand("restart") }),
-		fyne.NewMenuItem("Quit", func() { a.fa.Quit() }))))
-	a.win.SetContent(container.NewBorder(nil, container.NewHBox(a.status, a.infoLabel), nil, nil, tabs))
+		fyne.NewMenuItem("Quit", func() { a.shutdown() }))))
+	a.win.SetContent(container.NewBorder(nil, container.NewHBox(a.status, a.infoLabel), nil, nil, a.tabs))
 	a.win.SetCloseIntercept(func() { a.shutdown() })
-	go func() {
-		for range time.Tick(time.Second) {
-			fyne.Do(a.refresh)
-		}
-	}()
+	if !a.headless { // tests call refresh themselves: the test driver runs fyne.Do inline
+		go func() {
+			t := time.NewTicker(time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-a.done:
+					return
+				case <-t.C:
+					fyne.Do(a.refresh)
+				}
+			}
+		}()
+	}
 	a.refresh()
 }
 
-// shutdown mirrors CloseeAppSafely.
+// shutdown mirrors CloseeAppSafely. Every way out of the program (window
+// close, File > Quit, the console quit command) goes through it, once.
 func (a *App) shutdown() {
-	_ = a.n.SaveOptions()
-	a.r.Stop()
-	a.e.Stop()
-	a.fa.Quit()
+	a.closing.Do(func() {
+		close(a.done)
+		if a.n != nil {
+			_ = a.n.SaveOptions()
+			a.r.Stop()
+			a.e.Stop()
+			_ = os.WriteFile(a.n.Lay.ClosedMarker, nil, 0o644)
+		}
+		a.fa.Quit()
+	})
 }
 
 // refresh mirrors ActualizarGUI/UpdateStatusBar (1 s).
@@ -398,15 +461,18 @@ func (a *App) importWallet() {
 	}, a.win)
 }
 
+// exportWallet asks for a directory and writes a new, plaintext wallet file
+// there with the cli's expwallet. The file name is chosen here and the
+// command refuses to overwrite: the previous version let the save dialog
+// create the target and then deleted it, which could be the live wallet
+// (finding 2a).
 func (a *App) exportWallet() {
-	dialog.ShowFileSave(func(wc fyne.URIWriteCloser, err error) {
-		if err != nil || wc == nil {
+	dialog.ShowFolderOpen(func(dir fyne.ListableURI, err error) {
+		if err != nil || dir == nil {
 			return
 		}
-		path := wc.URI().Path()
-		wc.Close()
-		_ = os.Remove(path)
-		a.runCommand("expwallet " + strings.ReplaceAll(strings.TrimSuffix(path, ".pkw"), " ", "*"))
+		p := exportPath(dir.Path(), time.Now().Format("20060102-150405"), storage.Exists)
+		a.runCommand("expwallet " + strings.ReplaceAll(strings.TrimSuffix(p, ".pkw"), " ", "*"))
 	}, a.win)
 }
 

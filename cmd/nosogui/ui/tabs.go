@@ -47,15 +47,11 @@ func amountUnits(s string) (int64, bool) {
 
 func (a *App) walletTab() fyne.CanvasObject {
 	a.balance = widget.NewLabelWithStyle("", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
-	a.addrList = grid(func() [][]string { return a.addrRows }, 520, 160)
-	selected := -1
-	a.addrList.OnSelected = func(id widget.TableCellID) { selected = id.Row; a.selAddr = id.Row }
-	addr := func() string {
-		if selected < 0 || selected >= len(a.addrRows) {
-			return ""
-		}
-		return strings.TrimSuffix(a.addrRows[selected][0], " [MN]")
-	}
+	a.addrList = grid(func() [][]string { return a.addrRows }, 340, 150)
+	// The selection is kept as an address, not a row number: the grid is
+	// rebuilt every second and "hide empty" removes rows (finding 13).
+	a.addrList.OnSelected = func(id widget.TableCellID) { a.selAddr = addressFromRow(a.addrRows, id.Row) }
+	addr := func() string { return a.selAddr }
 
 	// BDefAddr, BCustomAddr, BCopyAddr, BNewAddr
 	def := widget.NewButton("Set default", func() {
@@ -95,6 +91,7 @@ func (a *App) walletTab() fyne.CanvasObject {
 	dest.SetPlaceHolder("destination address or alias")
 	amount := widget.NewEntry()
 	amount.SetText("0.00000000")
+	a.sendDest, a.sendAmount = dest, amount
 	ref := widget.NewEntry()
 	ref.SetPlaceHolder("reference")
 	destOK := widget.NewLabel("")
@@ -133,6 +130,7 @@ func (a *App) walletTab() fyne.CanvasObject {
 		amount.SetText(network.Int2Curr(consensus.GetMaximunToSend(bal)))
 	})
 	var send, conf, cancel *widget.Button
+	var sendRow *fyne.Container
 	set := func(confirming bool) {
 		for _, w := range []fyne.Disableable{dest, amount, ref} {
 			if confirming {
@@ -150,6 +148,7 @@ func (a *App) walletTab() fyne.CanvasObject {
 			conf.Hide()
 			cancel.Hide()
 		}
+		sendRow.Refresh() // a box does not re-lay out by itself when a child is shown or hidden
 	}
 	send = widget.NewButton("Send", func() { // SCBitSendOnClick
 		v, ok := amountUnits(amount.Text)
@@ -165,10 +164,7 @@ func (a *App) walletTab() fyne.CanvasObject {
 		v, _ := amountUnits(amount.Text)
 		line := fmt.Sprintf("SENDTO %s %d %s", dest.Text, v, ref.Text)
 		a.appendLog("console", ">> "+line)
-		start := a.selAddr - 1 // the original starts at the selected row
-		if start < 0 {
-			start = 0
-		}
+		start := sendStart(walletHashes(a.n), a.selAddr) // the original starts at the selected address
 		go a.e.SendFunds(line, func(s string) { a.appendLog("console", s) }, start)
 		dest.SetText("")
 		amount.SetText("0.00000000")
@@ -176,8 +172,10 @@ func (a *App) walletTab() fyne.CanvasObject {
 		set(false)
 	})
 	cancel = widget.NewButton("Cancel", func() { set(false) })
+	a.sendBtn, a.confBtn = send, conf
 	conf.Hide()
 	cancel.Hide()
+	sendRow = container.NewHBox(send, conf, cancel)
 	a.donate = func() {
 		dest.SetText(consensus.ProjectFunds)
 		amount.SetText("10.00000000")
@@ -190,8 +188,10 @@ func (a *App) walletTab() fyne.CanvasObject {
 		container.NewBorder(nil, nil, widget.NewLabel("Destination"), container.NewHBox(destOK, paste), dest),
 		container.NewBorder(nil, nil, widget.NewLabel("Amount"), container.NewHBox(amountOK, maxBtn), amount),
 		container.NewBorder(nil, nil, widget.NewLabel("Reference"), nil, ref),
-		container.NewHBox(send, conf, cancel))
-	return container.NewHSplit(left, form)
+		sendRow)
+	split := container.NewHSplit(left, form)
+	split.SetOffset(0.55)
+	return split
 }
 
 // fdialog shows a small OK/Cancel form.
@@ -225,6 +225,7 @@ func (a *App) consoleTab() fyne.CanvasObject {
 	a.console.Disable()
 	in := &cmdEntry{a: a}
 	in.ExtendBaseWidget(in)
+	a.consoleIn = &in.Entry
 	in.SetPlaceHolder("command (F3: repeat last, Esc: clear)")
 	in.OnSubmitted = func(s string) { // ConsoleLineKeyup VK_RETURN
 		in.SetText("")
@@ -267,7 +268,7 @@ func (a *App) monitorTab() fyne.CanvasObject {
 			"goroutines replace threads and transfers are logged in Events.", runtime.NumGoroutine(), m.HeapInuse/1048576))
 	}
 	updateProcs()
-	return container.NewAppTabs(
+	a.monTabs = container.NewAppTabs(
 		container.NewTabItem("Data", a.dataGrid),
 		container.NewTabItem("Connections", a.slotsGrid),
 		container.NewTabItem("Consensus", a.consGrid),
@@ -275,6 +276,7 @@ func (a *App) monitorTab() fyne.CanvasObject {
 		container.NewTabItem("Exceptions", container.NewBorder(nil, clearEx, nil, nil, a.excepLog)),
 		container.NewTabItem("Processes", container.NewVBox(procs, widget.NewButton("Refresh", updateProcs))),
 	)
+	return a.monTabs
 }
 
 // ---- Masternodes tab (TabNodes, GridNodes) ---------------------------------
@@ -319,8 +321,10 @@ func (a *App) optionsTab() fyne.CanvasObject {
 		c.SetChecked(v)
 		return c
 	}
+	hideEmpty := check("Hide empty addresses", o.HideEmpty, func(op *node.StorageOptions, b bool) { op.HideEmpty = b })
+	a.hideCheck = hideEmpty
 	wallet := container.NewVBox(
-		check("Hide empty addresses", o.HideEmpty, func(op *node.StorageOptions, b bool) { op.HideEmpty = b }),
+		hideEmpty,
 		check("Use all addresses to send funds", o.MultiSend, func(op *node.StorageOptions, b bool) { op.MultiSend = b }),
 		check("Keep a blocks database (order lookup)", o.BlocksDB, func(op *node.StorageOptions, b bool) { op.BlocksDB = b }),
 		check("No GUI refresh (headless)", o.NoGUI, func(op *node.StorageOptions, b bool) { op.NoGUI = b }),
@@ -383,7 +387,6 @@ func (a *App) optionsTab() fyne.CanvasObject {
 			widget.NewFormItem("Banned methods", banned)),
 		check("Enable the RPC server at start", o.RPCAuto, func(op *node.StorageOptions, b bool) { op.RPCAuto = b }),
 		check("Filter by IP whitelist", o.RPCFilter, func(op *node.StorageOptions, b bool) { op.RPCFilter = b }),
-		check("Save new addresses created by RPC", o.RPCSaveNew, func(op *node.StorageOptions, b bool) { op.RPCSaveNew = b }),
 		container.NewHBox(widget.NewButton("Start RPC", func() { a.runCommand("rpcon") }),
 			widget.NewButton("Stop RPC", func() { a.runCommand("rpcoff") })))
 
@@ -396,9 +399,10 @@ func (a *App) optionsTab() fyne.CanvasObject {
 		widget.NewLabel("Noso project: Brought to you by the Noso Team (original).\nThis is an independent, unofficial Go port."),
 		widget.NewLabel(fmt.Sprintf("Version %s%s  Protocol %d  %s", node.MainnetVersion, node.NodeRelease, node.Protocol, node.BuildDate)),
 		container.NewHBox(web, donate))
-	return container.NewAppTabs(
+	a.optTabs = container.NewAppTabs(
 		container.NewTabItem("Wallet", wallet), container.NewTabItem("Node", nodeTab),
 		container.NewTabItem("RPC", rpcTab), container.NewTabItem("About", about))
+	return a.optTabs
 }
 
 // testNode mirrors BTestNodeClick: it opens the server briefly and asks the
