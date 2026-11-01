@@ -332,7 +332,9 @@ func TestBlocksDBIndexAndLookup(t *testing.T) {
 	o := types.Order{OrderType: "TRFR", OrderID: "ORabc123", Address: "NA", Receiver: "NB", Block: 5}
 	_ = bs.Write(&Block{Header: types.BlockHeader{Number: 5, TrxTotales: 1}, Orders: []types.Order{o}})
 	d := OpenBlocksDB(l.BlocksDB)
-	d.Update(bs)
+	if err := d.Update(bs, 5); err != nil {
+		t.Fatal(err)
+	}
 	if d.Records() != 1 || d.LastBlock() != 5 {
 		t.Fatalf("records %d last %d", d.Records(), d.LastBlock())
 	}

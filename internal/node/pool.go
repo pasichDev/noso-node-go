@@ -56,6 +56,50 @@ func (n *Node) replacePending(taken, keep []types.Order) {
 	n.pool = out
 }
 
+// MaxPoolLines bounds the pool. A full pool refuses new orders; it never
+// evicts an order that was admitted, so a flood cannot push out other users'
+// orders.
+const MaxPoolLines = 6000
+
+// pruneMined drops from the pool what a new chain tip made useless: the lines
+// of orders the tip's blocks hold (and with them any remaining line of the
+// same wire order) and every line older than the tip's start, which no later
+// block can take. Every node that accepts or builds a block calls it, so the
+// pool of a node that never builds does not grow without bound and its wallet
+// does not see stale pending payments.
+func (n *Node) pruneMined(mined map[string]bool, tip types.BlockHeader) {
+	n.poolMu.Lock()
+	defer n.poolMu.Unlock()
+	gone := map[string]bool{}
+	for _, o := range n.pool {
+		if mined[o.TrfrID] {
+			gone[o.OrderID] = true
+		}
+	}
+	out := n.pool[:0]
+	for _, o := range n.pool {
+		if mined[o.TrfrID] || gone[o.OrderID] || o.TimeStamp < tip.TimeStart {
+			continue
+		}
+		out = append(out, o)
+	}
+	for i := len(out); i < len(n.pool); i++ {
+		n.pool[i] = types.Order{}
+	}
+	n.pool = out
+}
+
+// minedIDs lists the transfer ids of the user orders of blocks.
+func minedIDs(orders ...[]types.Order) map[string]bool {
+	m := map[string]bool{}
+	for _, l := range orders {
+		for _, o := range l {
+			m[o.TrfrID] = true
+		}
+	}
+	return m
+}
+
 // TruncatePending mirrors the `setlength(ArrayPoolTXs,0)` of
 // VerifyConnectionStatus (mpred.pas:519-522) when the network reports
 // fewer pending orders than we hold.
@@ -83,44 +127,69 @@ func (n *Node) TrxExistsInLastBlock(trfrID string) bool {
 	return false
 }
 
-// AddPool mirrors AddArrayPoolTXs (nosonetwork.pas:281-329): orders older
-// than the last block, already mined, or (late in the period) too old are
-// dropped; the rest are inserted ordered by timestamp, then OrderID, then
-// TrxLine.
-func (n *Node) AddPool(o types.Order) bool {
-	last := n.LastBlockData()
-	if o.TimeStamp < last.TimeStart {
+// AddPool puts one order of a single line into the pool; see AddPoolGroup.
+func (n *Node) AddPool(o types.Order) bool { return n.AddPoolGroup([]types.Order{o}) }
+
+// AddPoolGroup mirrors AddArrayPoolTXs (nosonetwork.pas:281-329) for a whole
+// wire order: orders older than the last block, already mined, or (late in
+// the period) too old are dropped; the rest are inserted ordered by
+// timestamp, then OrderID, then TrxLine. FIX: the group is checked as the
+// builder and the validator will check it, before any line is stored: the
+// lines are numbered 1..n, all declare n (the count is signed), share receiver,
+// time and reference, and carry the id derived from them. All lines go in or
+// none does, so the pool only ever holds complete, consistent orders and the
+// builder never has to guess where one ends.
+func (n *Node) AddPoolGroup(lines []types.Order) bool {
+	if len(lines) == 0 || len(lines) > 30 || int(lines[0].OrderLines) != len(lines) {
 		return false
 	}
-	if n.TrxExistsInLastBlock(o.TrfrID) {
-		return false
-	}
-	if n.BlockAge() > 585 && o.TimeStamp < last.TimeStart+540 {
-		return false
-	}
-	if n.TranxAlreadyPending(o.TrfrID) {
-		return false
-	}
-	n.poolMu.Lock()
-	defer n.poolMu.Unlock()
-	pos := len(n.pool)
-	for i, p := range n.pool {
-		if o.TimeStamp < p.TimeStamp {
-			pos = i
-			break
-		} else if o.TimeStamp == p.TimeStamp {
-			if o.OrderID < p.OrderID {
-				pos = i
-				break
-			} else if o.OrderID == p.OrderID && o.TrxLine < p.TrxLine {
-				pos = i
-				break
+	if len(lines) > 1 {
+		for _, o := range lines {
+			if o.OrderType != "TRFR" {
+				return false
 			}
 		}
 	}
-	n.pool = append(n.pool, types.Order{})
-	copy(n.pool[pos+1:], n.pool[pos:])
-	n.pool[pos] = o
+	if checkOrderGroups(lines) != nil {
+		return false
+	}
+	last := n.LastBlockData()
+	for _, o := range lines {
+		if o.TimeStamp < last.TimeStart || n.TrxExistsInLastBlock(o.TrfrID) {
+			return false
+		}
+		if n.BlockAge() > 585 && o.TimeStamp < last.TimeStart+540 {
+			return false
+		}
+		if n.TranxAlreadyPending(o.TrfrID) {
+			return false
+		}
+	}
+	n.poolMu.Lock()
+	defer n.poolMu.Unlock()
+	if len(n.pool)+len(lines) > MaxPoolLines {
+		return false
+	}
+	for _, o := range lines {
+		pos := len(n.pool)
+		for i, p := range n.pool {
+			if o.TimeStamp < p.TimeStamp {
+				pos = i
+				break
+			} else if o.TimeStamp == p.TimeStamp {
+				if o.OrderID < p.OrderID {
+					pos = i
+					break
+				} else if o.OrderID == p.OrderID && o.TrxLine < p.TrxLine {
+					pos = i
+					break
+				}
+			}
+		}
+		n.pool = append(n.pool, types.Order{})
+		copy(n.pool[pos+1:], n.pool[pos:])
+		n.pool[pos] = o
+	}
 	return true
 }
 
@@ -310,6 +379,16 @@ func (n *Node) PTCOrder(line string) string {
 			proceder = false
 			setCode(102)
 		}
+		// FIX: the wire order and its lines must agree. The line count and the
+		// line number are signed; the order id is the one derived from the
+		// lines; the lines share time and reference. A line that declares more
+		// lines than the order carries would otherwise swallow its neighbours
+		// when the builder takes a group.
+		if ok && (int(o.OrderLines) != numTransfers || int(o.TrxLine) != cont+1 || o.OrderID != recOrderID ||
+			(len(trx) > 1 && (o.TimeStamp != trx[0].TimeStamp || o.Reference != trx[0].Reference))) {
+			proceder = false
+			setCode(103)
+		}
 		totalSent += o.AmmountTrf
 		totalFee += o.AmmountFee
 		genOrderID += o.TrfrID
@@ -356,8 +435,8 @@ func (n *Node) PTCOrder(line string) string {
 	}
 	if proceder {
 		tb := PTCHeader(n) + "ORDER " + codec.IntToStr(int64(numTransfers)) + " " + codec.GetOpData(line)
-		for _, o := range trx {
-			n.AddPool(o)
+		if !n.AddPoolGroup(trx) {
+			return "ERROR 104" // pool full, or too old for this period
 		}
 		if n.Broadcast != nil && n.serverActive() {
 			n.Broadcast(tb)
@@ -468,8 +547,9 @@ func (n *Node) PTCSendGVT(line string) int {
 	if n.GVTAlreadyTransferred(o.Reference) {
 		code = 6
 	}
-	num := codec.StrToIntDef(o.Reference, -1)
-	if num < 0 || num > 99 || n.GVTs.Index(int(num)).Owner != addr {
+	// FIX: only the canonical number counts (the builder and the validator
+	// read nothing else), so an order the block cannot take is not admitted.
+	if num, good := gvtNumber(o.Reference); !good || n.GVTs.Index(num).Owner != addr {
 		code = 8
 	}
 	if !ValidReceiver(o.Receiver) {

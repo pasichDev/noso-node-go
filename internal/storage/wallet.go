@@ -242,6 +242,20 @@ func (w *Wallet) Set(i int, d types.Wallet) {
 	w.mu.Unlock()
 }
 
+// SetBalance changes only the Balance of the record of addr, under the wallet
+// lock; a concurrent reorder or insert cannot make it write one record's keys
+// over another's. It reports whether addr is in the wallet.
+func (w *Wallet) SetBalance(addr string, v int64) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	i := w.indexLocked(addr)
+	if i < 0 {
+		return false
+	}
+	w.arr[i].Balance = v
+	return true
+}
+
 // Len mirrors LenWallArr.
 func (w *Wallet) Len() int {
 	w.mu.Lock()

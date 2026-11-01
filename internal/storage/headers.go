@@ -70,9 +70,16 @@ func (h *Headers) Add(block int64, blockHash, sumHash string) bool {
 	// record the new one is written at the record boundary, over the partial.
 	off := st.Size() / types.ResumenSize * types.ResumenSize
 	// COMPAT: BlockNumber is Int64 but the record field is a 32-bit integer.
+	Crash("hdr-add-pre")
+	if CrashHook != nil { // a torn record: half of it reaches the disk
+		e := types.Resumen{Block: int32(block), BlockHash: blockHash, SumHash: sumHash}.Encode()
+		_, _ = f.WriteAt(e[:len(e)/2], off)
+		CrashHook("hdr-add-torn")
+	}
 	if _, err = f.WriteAt(types.Resumen{Block: int32(block), BlockHash: blockHash, SumHash: sumHash}.Encode(), off); err != nil {
 		return false
 	}
+	Crash("hdr-add-post")
 	return syncFile(f) == nil // durable before the caller moves on (re2 #7)
 }
 
@@ -88,6 +95,7 @@ func (h *Headers) RemoveLast() bool {
 	if n == 0 {
 		return false // seek(-1) raises in Pascal
 	}
+	Crash("hdr-rm-pre")
 	if os.Truncate(h.path, (n-1)*types.ResumenSize) != nil {
 		return false
 	}

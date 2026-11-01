@@ -1,9 +1,11 @@
 package node
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/pasichDev/noso-node-go/internal/codec"
@@ -24,9 +26,89 @@ type BuildResult struct {
 	ErrorMessage string
 }
 
-// CreateGenesis mirrors CrearBloqueCero (mpblock.pas:76-81).
-func (n *Node) CreateGenesis() {
-	_, _ = n.BuildNewBlock(0, consensus.GenesysTimeStamp, "", consensus.AdminHash, "")
+// CreateGenesis mirrors CrearBloqueCero (mpblock.pas:76-81). It is the whole
+// creation of a chain's first block, state files and all, and it can be run
+// again at any time on a chain that has no block 1: it first clears whatever
+// an earlier, interrupted run left behind. See ensureGenesis.
+func (n *Node) CreateGenesis() error {
+	n.chainMu.Lock()
+	defer n.chainMu.Unlock()
+	return n.createGenesisLocked()
+}
+
+// genesisBlock is block 0 of a chain born here. It is a pure function of the
+// consensus constants: every node derives the same bytes.
+func genesisBlock() *storage.Block {
+	h := types.BlockHeader{
+		Number: 0, TimeStart: consensus.GenesisStartTime, TimeEnd: consensus.GenesysTimeStamp,
+		TimeTotal:     int32(consensus.GenesysTimeStamp - consensus.GenesisStartTime),
+		Difficult:     consensus.InitialBlockDiff,
+		LastBlockHash: "NOSO GENESYS BLOCK",
+		AccountMiner:  codec.Truncate(consensus.AdminHash, 40),
+		Reward:        consensus.GetBlockReward(0),
+	}
+	return &storage.Block{Header: h}
+}
+
+// genesisIsOurs reports that block 0 on disk is exactly the genesis block of a
+// chain born here and that the chain has no later block.
+func (n *Node) genesisIsOurs() bool {
+	if n.Blocks.LastUpdated() >= 1 {
+		return false
+	}
+	raw, err := os.ReadFile(n.Lay.BlockFile(0))
+	return err == nil && bytes.Equal(raw, genesisBlock().Encode())
+}
+
+// ensureGenesis makes a node that has no block 1 start from a complete,
+// correct genesis. Block 0 is the same on every node and nothing depends on
+// it yet, so the safe way to survive a crash at any point of its creation is
+// to do all of it again: while the chain is only its genesis, every start
+// clears the genesis files and writes them anew, in an order that ends with
+// the headers record. At any crash point the next start therefore ends with
+// the derived state, or with an error.
+func (n *Node) ensureGenesis() error {
+	if n.Blocks.LastUpdated() >= 1 {
+		return nil
+	}
+	if storage.Exists(n.Lay.BlockFile(0)) && !n.genesisIsOurs() {
+		return nil // a block 0 from another source: the chain is not born here
+	}
+	n.chainMu.Lock()
+	defer n.chainMu.Unlock()
+	return n.createGenesisLocked()
+}
+
+func (n *Node) createGenesisLocked() error {
+	storage.Crash("gen-start")
+	// Everything a half-made genesis may have left goes first. Block 0 goes
+	// before the files that depend on it, so "block 0 exists" is never true
+	// together with a state that was not made from it.
+	n.Blocks.Delete(0)
+	_ = os.RemoveAll(filepath.Join(n.Lay.Root, "UNDO"))
+	n.endJournal()
+	storage.Crash("gen-cleared")
+	n.Headers.Create()
+	n.Summary.CreateNew(false)
+	if err := os.WriteFile(n.Lay.GVTs, nil, 0o644); err != nil {
+		return err
+	}
+	n.GVTs.Reload()
+	_ = os.Remove(n.Lay.PSOs)
+	n.PSOs.Load()
+	_ = n.dbRollback(-1)
+	storage.Crash("gen-state-cleared")
+	r, err := n.buildLocked(0, consensus.GenesysTimeStamp, "", consensus.AdminHash, "")
+	if err != nil {
+		return err
+	}
+	if r == nil {
+		return errors.New("genesis block was not built (blocks are skipped or the node is in STOP mode)")
+	}
+	if !n.genesisIsOurs() || n.Headers.Height() != 0 || n.Summary.LastOp() != 0 {
+		return errors.New("genesis creation did not leave a consistent state")
+	}
+	return nil
 }
 
 func createDevPaymentOrder(number int64, timestamp, amount, myLast int64) types.Order {
@@ -109,7 +191,9 @@ func gvtNumber(ref string) (int, bool) {
 }
 
 // applyEnd applies the closing payments of block number: the project share,
-// the masternode shares (each locked for 2016 blocks), the miner's remainder
+// the masternode shares (each address gets a lock record for 2016 blocks; the
+// lock is pool policy, applyOrder does not enforce it), the miner's remainder
+// (what the masternodes are not paid stays with the miner)
 // and the touch of the genesis account that records the block number.
 func (n *Node) applyEnd(number int64, miner string, fees int64, mns []string) (dev, mnsPay, pow int64, newMNs int, err error) {
 	reward := consensus.GetBlockReward(number)
@@ -127,6 +211,14 @@ func (n *Node) applyEnd(number int64, miner string, fees int64, mns []string) (d
 		if err = credit(storage.GenesisAddress, 0); err != nil { // slot 0 holds the last operation
 			return
 		}
+	}
+	if number == 1 {
+		// FIX(GAP-2): the 100 GVTs of a chain born here are created by its first
+		// block, by a rule the builder, every follower and every replay apply the
+		// same way: they belong to the proposer that seals block 1. (The genesis
+		// account that receives the premine has no key, so GVTs created for it
+		// could never be sent.)
+		n.GVTs.Seed(miner)
 	}
 	if number >= consensus.PoSBlockEnd {
 		if err = credit(consensus.ProjectFunds, dev); err != nil {
@@ -244,6 +336,9 @@ func (n *Node) buildLocked(number, timestamp int64, targetHash, miner, solution 
 		if headerAdded {
 			n.Headers.RemoveLast()
 		}
+		if number > 0 {
+			_ = n.dbRollback(myLast)
+		}
 		n.SetMyLastBlock(myLast)
 		n.UpdateMyData()
 		if number > 0 {
@@ -268,14 +363,18 @@ func (n *Node) buildLocked(number, timestamp int64, targetHash, miner, solution 
 	if number > 0 {
 		for gi := 0; gi < len(pool); {
 			// A wire order is a group of lines that is taken or left whole.
+			// The pool holds only complete groups (AddPoolGroup); if one is
+			// not, only the line at hand is judged and dropped, never the
+			// lines behind it.
 			first := pool[gi]
 			cnt := 1
 			if first.OrderType == "TRFR" {
 				cnt = int(first.OrderLines)
-				if cnt < 1 || cnt > 30 || gi+cnt > len(pool) {
-					gi++
-					continue
-				}
+			}
+			if cnt < 1 || cnt > 30 || gi+cnt > len(pool) || checkOrderGroups(pool[gi:gi+cnt]) != nil ||
+				(gi+cnt < len(pool) && pool[gi+cnt].OrderID == first.OrderID) {
+				gi++
+				continue
 			}
 			group := pool[gi : gi+cnt]
 			gi += cnt
@@ -422,17 +521,25 @@ func (n *Node) buildLocked(number, timestamp int64, targetHash, miner, solution 
 	n.UpdateMyData()
 	n.Summary.SetHash()
 	if !n.Headers.Add(number, n.MyLastBlockHash(), n.Summary.Hash()) {
-		rollback(true)
+		// The record was not added: removing "the last record" would take the
+		// previous block's.
+		rollback(false)
 		return nil, errHeaderWrite
+	}
+	if err := n.indexBlock(blk); err != nil {
+		rollback(true)
+		return nil, err
 	}
 	if number > 0 {
 		n.endJournal() // the change is complete: chain and state agree
 	}
 	n.noteTip(number)
 	n.pruneSnapshots(number)
+	n.RefreshWalletBalances()
 
 	// Only now is the pool and the masternode state of this period consumed.
 	n.replacePending(pool, ignored)
+	n.pruneMined(minedIDs(list), blk.Header)
 	if number >= consensus.MNBlockStart {
 		n.MNFile.Save(mnsText)
 	}
@@ -502,7 +609,7 @@ func (n *Node) groupApplies(group []types.Order, debit map[string]int64) bool {
 // persistDerived writes the files derived from the chain besides the
 // summary: GVT owners, masternode locks and their expiry.
 func (n *Node) persistDerived(number int64, gvtMoved bool) error {
-	if gvtMoved {
+	if gvtMoved || number == 1 {
 		if err := n.GVTs.Save(); err != nil {
 			return err
 		}
@@ -770,7 +877,8 @@ func (n *Node) rebuildLocked(upTo int64, onBlock func(int64)) error {
 		n.UpdateMyData()
 		return err
 	}
-	goChain := false
+	// A chain born here has a V2 block 1, or is only its own genesis block.
+	goChain := n.genesisIsOurs()
 	if blk, err := n.Blocks.Read(1); err == nil && blk.V2 {
 		goChain = true
 	}
@@ -798,6 +906,14 @@ func (n *Node) rebuildLocked(upTo int64, onBlock func(int64)) error {
 		onBlock(0)
 	}
 	for i := int64(1); i <= upTo; i++ {
+		if goChain {
+			// A block of a chain born here that no longer decodes as one is
+			// damaged, not an old-network block: it must not be replayed by
+			// the lenient legacy rules.
+			if b, err := n.Blocks.Read(i); err != nil || !b.V2 {
+				return fail(bad("block %d of this chain is damaged or has no seal", i))
+			}
+		}
 		if err := n.addBlockToSummaryLocked(i, true); err != nil {
 			return fail(err)
 		}
@@ -846,6 +962,7 @@ func (n *Node) undoLastLocked() {
 	n.Headers.RemoveLast()
 	n.Blocks.Delete(num)
 	n.SetMyLastBlock(n.Blocks.LastUpdated())
+	_ = n.dbRollback(n.MyLastBlock())
 	n.UpdateMyData()
 	n.logf("console", "Block undone: "+codec.IntToStr(num))
 }
@@ -887,6 +1004,7 @@ func (n *Node) removeBlocksLocked(upTo int64) int {
 	for n.Headers.Height() >= int(upTo) && n.Headers.RemoveLast() {
 	}
 	n.SetMyLastBlock(n.Blocks.LastUpdated())
+	_ = n.dbRollback(n.MyLastBlock())
 	if haveSnap {
 		_ = n.restoreSnapshot(label)
 	} else {

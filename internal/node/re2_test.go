@@ -321,14 +321,20 @@ func TestRE2_ProposerListBound(t *testing.T) {
 	}
 }
 
-// re2 security M-4: what the proposer earns does not depend on how many
-// masternodes it lists.
+// re2 security M-4, as decided: the proposers are trusted, so the masternode
+// list is not a check on them. What is not paid to listed masternodes stays
+// with the miner (as in the original) and nothing is burnt.
 func TestRE2_MNShareNotCaptured(t *testing.T) {
 	r := consensus.GetBlockReward(100000)
-	_, _, _, powNone, _ := consensus.Shares(100000, r, 0, 0)
-	_, _, _, powMany, _ := consensus.Shares(100000, r, 0, 100)
-	if powNone != powMany {
-		t.Fatalf("proposer earns %d with no masternodes, %d with 100", powNone, powMany)
+	dev, _, _, powNone, _ := consensus.Shares(100000, r, 0, 0)
+	if powNone != r-dev {
+		t.Fatalf("with no masternode listed the miner earns %d, the block pays %d beyond the project share", powNone, r-dev)
+	}
+	for _, n := range []int{1, 7, 100} {
+		d, pay, tot, pow, _ := consensus.Shares(100000, r, 0, n)
+		if d+tot+pow != r || tot != pay*int64(n) || pow < powNone-tot-int64(n) {
+			t.Fatalf("%d masternodes: dev %d paid %d miner %d of %d", n, d, tot, pow, r)
+		}
 	}
 }
 

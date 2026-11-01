@@ -12,6 +12,10 @@ import (
 	"github.com/pasichDev/noso-node-go/internal/types"
 )
 
+// OutOfTurnGrace is how long after a slot's boundary only its turn holder may
+// seal the block of that slot.
+const OutOfTurnGrace = 120
+
 // ErrInvalidBlock wraps every block validation failure.
 var ErrInvalidBlock = errors.New("invalid block")
 
@@ -95,8 +99,20 @@ func (n *Node) ValidateBlock(b *storage.Block, prev types.BlockHeader, prevHash 
 	if !b.V2 || len(b.Keys) != len(b.Orders) {
 		return bad("block has no authentication trailer")
 	}
-	if _, err := n.checkSeal(b); err != nil {
+	idx, err := n.checkSeal(b)
+	if err != nil {
 		return err
+	}
+	// FIX: the slot belongs to its turn holder for a while. A block of another
+	// proposer for a slot is refused until OutOfTurnGrace seconds after the
+	// slot's boundary: sealed a few seconds early it used to take the slot
+	// (the turn holder, building at the boundary, found the tip already at that
+	// time and could not build), and with it every reward and the choice of
+	// orders. Once the grace has passed, a missed slot can still be filled and
+	// the turn holder's own block, if it turns up, outweighs the stand-in.
+	if props := n.Proposers(); len(props) > 0 && int(SlotOf(h.TimeEnd)%int64(len(props))) != idx &&
+		n.UTCTime() < h.TimeEnd+OutOfTurnGrace {
+		return bad("block of another proposer's slot, before the grace period of %d s", OutOfTurnGrace)
 	}
 	if miner := crypto.GetAddressFromPublicKey(b.SealKey, 0); h.AccountMiner != miner {
 		return bad("miner %q is not the proposer %q", h.AccountMiner, miner)
@@ -209,12 +225,15 @@ func (n *Node) ValidateBlock(b *storage.Block, prev types.BlockHeader, prevHash 
 	return nil
 }
 
-// checkOrderGroups binds OrderID, OrderLines and TrxLine, which the order
-// signature does not cover. FIX(re2 H-2, 10): lines that share an OrderID are
-// one wire order and must pay one receiver at one time; the group must be
-// complete, numbered 1..n in order and carry the id derived from its lines.
-// A proposer can therefore not attach a line to someone else's order, relabel
-// it, or make one order pay two receivers.
+// checkOrderGroups binds OrderID to the lines of a wire order. The signature
+// of every line covers its number (TrxLine) and the line count (OrderLines);
+// OrderID is derived from the lines and cannot be signed (it contains the
+// signatures' ids), so it is checked here. FIX(re2 H-2, 10; final round):
+// lines that share an OrderID are one wire order and must pay one receiver at
+// one time; the group must be complete, numbered 1..n in order, every line
+// must declare n, and the id must be the one derived from the lines. A
+// proposer can therefore not attach a line to someone else's order, execute a
+// prefix of an order as a shorter one, or make one order pay two receivers.
 func checkOrderGroups(user []types.Order) error {
 	for i := 0; i < len(user); {
 		g := user[i]

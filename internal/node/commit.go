@@ -68,6 +68,7 @@ func (n *Node) commitJournal(restore string, last, start int64, blocks map[int64
 	if err := os.MkdirAll(n.journalDir(), 0o700); err != nil {
 		return err
 	}
+	storage.Crash("cj-dir")
 	for num, raw := range blocks {
 		if err := storage.WriteFileAtomic(filepath.Join(n.journalDir(), codec.IntToStr(num)+".blk"), raw); err != nil {
 			return err
@@ -79,8 +80,11 @@ func (n *Node) commitJournal(restore string, last, start int64, blocks map[int64
 }
 
 func (n *Node) endJournal() {
+	storage.Crash("ej-pre")
 	_ = os.Remove(n.journalPath())
+	storage.Crash("ej-mid")
 	_ = os.RemoveAll(n.journalDir())
+	storage.Crash("ej-post")
 	syncDir(n.Lay.Root)
 }
 
@@ -117,8 +121,13 @@ func (n *Node) recoverLocked() error {
 		}
 		n.cutChainFrom(cut)
 		if j.Count > 0 && len(blocks) == j.Count {
-			// Run the journalled blocks again. They extend the chain now.
-			if _, err := n.acceptRunLocked(blocks); err != nil {
+			// Run the journalled blocks again. They extend the chain now. The
+			// journal stays as it is until the replay is complete, so a second
+			// crash finds the same journal.
+			n.chainState.replaying = true
+			_, err := n.acceptRunLocked(blocks)
+			n.chainState.replaying = false
+			if err != nil {
 				n.logf("exceps", "journal replay: "+err.Error())
 			}
 		}
@@ -143,6 +152,7 @@ func (n *Node) cutChainFrom(from int64) {
 	for int64(n.Headers.Height()) > last && n.Headers.RemoveLast() {
 	}
 	n.SetMyLastBlock(last)
+	_ = n.dbRollback(last)
 	n.UpdateMyData()
 }
 
@@ -152,15 +162,26 @@ func (n *Node) repairLocked(why string) error {
 	for int64(n.Headers.Height()) > last && n.Headers.RemoveLast() {
 	}
 	healthy := int64(n.Headers.Height()) == last && n.Summary.LastOp() == last
+	if healthy {
+		// The tip file must be the block the headers file recorded, and a
+		// block of a chain born here must still decode (a truncated or
+		// damaged tip passed the state-root test, which skipped what it
+		// could not read).
+		recs := n.Headers.All()
+		if int64(len(recs)) != last+1 || recs[last].BlockHash != crypto.IDHashFile(n.Lay.BlockFile(last)) {
+			healthy = false
+		}
+	}
 	if healthy && last >= 1 {
-		if blk, err := n.Blocks.Read(last); err == nil && blk.V2 {
-			if root, _, ok := parseSolution(blk.Header.Solution); ok && root != n.stateRoot() {
-				healthy = false
-			}
+		blk, err := n.Blocks.Read(last)
+		if err != nil || !blk.V2 {
+			healthy = false
+		} else if root, _, ok := parseSolution(blk.Header.Solution); !ok || root != n.stateRoot() {
+			healthy = false
 		}
 	}
 	if healthy {
-		return nil
+		return n.syncBlocksDB()
 	}
 	n.logf("console", "State does not match the chain, replaying it "+why)
 	err := n.rebuildLocked(last, func(i int64) {
@@ -176,7 +197,7 @@ func (n *Node) repairLocked(why string) error {
 		return errors.Join(ErrCorrupt, err)
 	}
 	n.UpdateMyData()
-	return nil
+	return n.syncBlocksDB()
 }
 
 // stateRoot is the commitment every sealed block carries: the hash of the
@@ -190,7 +211,12 @@ func (n *Node) stateRoot() string {
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		b, _ := os.ReadFile(files[name])
+		b, err := os.ReadFile(files[name])
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			// An unreadable file must not look like an empty one: the root
+			// then matches nothing a block can carry.
+			return "UNREADABLE " + name
+		}
 		parts = append(parts, name, crypto.SHA256String(string(b)))
 	}
 	return crypto.SHA256String("STATEROOT1|" + strings.Join(parts, "|"))

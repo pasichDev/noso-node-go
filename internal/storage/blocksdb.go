@@ -118,16 +118,25 @@ func (d *BlocksDB) RollbackTo(block int32) error {
 	return err
 }
 
-// LastBlock mirrors GetDBLastBlock (0 for an empty file).
+// LastBlock mirrors GetDBLastBlock (0 for an empty file). Only the last record
+// is read.
 func (d *BlocksDB) LastBlock() int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	raw, err := os.ReadFile(d.path)
-	if err != nil || len(raw) < types.DBRecSize {
+	f, err := os.Open(d.path)
+	if err != nil {
 		return 0
 	}
-	n := len(raw) / types.DBRecSize
-	return int(types.DecodeDBRecord(raw[(n-1)*types.DBRecSize:]).Block)
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil || st.Size() < types.DBRecSize {
+		return 0
+	}
+	buf := make([]byte, types.DBRecSize)
+	if _, err := f.ReadAt(buf, (st.Size()/types.DBRecSize-1)*types.DBRecSize); err != nil {
+		return 0
+	}
+	return int(types.DecodeDBRecord(buf).Block)
 }
 
 // Records mirrors GetDBRecords.
@@ -148,21 +157,54 @@ func (d *BlocksDB) Blocks(orderID string) []int32 {
 	return append([]int32(nil), d.index[DBIndex(orderID)]...)
 }
 
-// Update mirrors UpdateBlockDatabase: up to 1000 blocks after the last
-// indexed one are added.
-func (d *BlocksDB) Update(bs *Blocks) {
-	last := d.LastBlock()
-	until := last + 1000
-	if mine := int(bs.LastUpdated()); until > mine {
-		until = mine
+// AddBlock records every order of a block with one write and one sync. The
+// block must be above everything recorded (RollbackTo first on a reorg).
+func (d *BlocksDB) AddBlock(block int32, orders []types.Order) error {
+	var buf []byte
+	var ids []int32
+	for _, o := range orders {
+		if o.OrderType == "" {
+			continue
+		}
+		id := DBIndex(o.OrderID)
+		buf = append(buf, types.DBRecord{Block: block, OrderID: id, Source: DBIndex(o.Address), Target: DBIndex(o.Receiver)}.Encode()...)
+		ids = append(ids, id)
 	}
-	for b := last + 1; b <= until; b++ {
-		for _, o := range bs.Orders(int64(b)) {
-			if o.OrderType != "" {
-				d.Add(int32(b), DBIndex(o.OrderID), DBIndex(o.Address), DBIndex(o.Receiver))
-			}
+	if len(buf) == 0 {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	f, err := os.OpenFile(d.path, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if _, err = f.WriteAt(buf, st.Size()/types.DBRecSize*types.DBRecSize); err != nil {
+		return err
+	}
+	if err = syncFile(f); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		d.index[id] = append(d.index[id], block)
+	}
+	return nil
+}
+
+// Update mirrors UpdateBlockDatabase: every block after the last indexed one,
+// up to upTo, is added.
+func (d *BlocksDB) Update(bs *Blocks, upTo int64) error {
+	for b := int64(d.LastBlock()) + 1; b <= upTo; b++ {
+		if err := d.AddBlock(int32(b), bs.Orders(b)); err != nil {
+			return err
 		}
 	}
+	return nil
 }
 
 // BlockFromOrder mirrors GetBlockFromOrder: the block holding the order or -1.

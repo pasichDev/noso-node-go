@@ -239,7 +239,11 @@ func (bs *Blocks) Write(b *Block) error {
 }
 
 // Delete removes block n (TryDeleteFile).
-func (bs *Blocks) Delete(n int64) { _ = os.Remove(bs.lay.BlockFile(n)) }
+func (bs *Blocks) Delete(n int64) {
+	Crash("del-pre")
+	_ = os.Remove(bs.lay.BlockFile(n))
+	Crash("del-post")
+}
 
 // LastUpdated mirrors GetMyLastUpdatedBlock: the highest N among N.blk
 // files below BLOCKS.

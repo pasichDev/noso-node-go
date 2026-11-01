@@ -129,3 +129,49 @@ func TestAliasTakenSeesFreshCustomization(t *testing.T) {
 	}
 	_ = b
 }
+
+// The genesis GVTs are a function of nothing but the owner: the same bytes on
+// every node and after every replay.
+func TestGVTSeedIsDeterministic(t *testing.T) {
+	a, b := OpenGVTs(tmp(t).GVTs), OpenGVTs(tmp(t).GVTs)
+	a.Seed("N3DthVsfEUtqrgWFHTEB6F88xLkT3Df")
+	b.Seed("N3DthVsfEUtqrgWFHTEB6F88xLkT3Df")
+	if err := a.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if a.Len() != 100 || a.Hash() != b.Hash() {
+		t.Fatalf("%d records, %s/%s", a.Len(), a.Hash(), b.Hash())
+	}
+	a.Reload()
+	if a.Len() != 100 || a.Index(99).Number != "99" || a.Index(0).Owner != "N3DthVsfEUtqrgWFHTEB6F88xLkT3Df" {
+		t.Fatalf("reload: %+v", a.Index(99))
+	}
+}
+
+// AddBlock writes one block's records at once; RollbackTo takes them out; a
+// reorganised branch leaves no record behind.
+func TestBlocksDBAddBlockAndRollback(t *testing.T) {
+	l := tmp(t)
+	d := OpenBlocksDB(l.BlocksDB)
+	o := func(id string, blk int32) types.Order {
+		return types.Order{OrderType: "TRFR", OrderID: id, Address: "NA", Receiver: "NB", Block: blk}
+	}
+	if err := d.AddBlock(3, []types.Order{o("ORa", 3), o("ORb", 3)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.AddBlock(4, []types.Order{o("ORc", 4)}); err != nil {
+		t.Fatal(err)
+	}
+	if d.Records() != 3 || d.LastBlock() != 4 {
+		t.Fatalf("records %d last %d", d.Records(), d.LastBlock())
+	}
+	if err := d.RollbackTo(3); err != nil {
+		t.Fatal(err)
+	}
+	if d.Records() != 2 || d.LastBlock() != 3 || len(d.Blocks("ORc")) != 0 || len(d.Blocks("ORa")) != 1 {
+		t.Fatalf("after rollback: records %d last %d", d.Records(), d.LastBlock())
+	}
+}

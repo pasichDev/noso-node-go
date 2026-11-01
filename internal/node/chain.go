@@ -24,8 +24,12 @@ import (
 // proposer list: nothing can be authenticated, so nothing is accepted.
 var ErrNoProposers = errors.New("no proposer keys configured: peer blocks cannot be authenticated")
 
-// ErrCorrupt is returned once local data was found inconsistent below the
-// finality horizon; the node stops touching its chain until it is rebuilt.
+// ErrCorrupt is returned once local data was found inconsistent and could not
+// be repaired; the node stops touching its chain until it is rebuilt. The text
+// says "finality horizon" for the 20-block guard of the operator commands
+// (undoblock, removeblocks, replay repair), which is not a finality of the
+// chain: fork choice has none (docs/consensus.md). The wording stays because
+// the network package matches it.
 var ErrCorrupt = errors.New("local chain data inconsistent below the finality horizon")
 
 const proposersFile = "proposers.txt"

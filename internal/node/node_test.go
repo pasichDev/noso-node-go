@@ -2,6 +2,7 @@ package node
 
 import (
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -145,21 +146,38 @@ func TestPoSRangeNoLongerStops(t *testing.T) {
 func TestOrderPoolOrdering(t *testing.T) {
 	now := int64(consensus.GenesysTimeStamp) + 600
 	n := newTestNode(t, &now)
-	// ordered by timestamp, then OrderID, then TrxLine (nosonetwork.pas:294-321)
+	// ordered by timestamp, then OrderID, then TrxLine (nosonetwork.pas:294-321);
+	// only complete, consistent orders are admitted (AddPoolGroup)
 	last := n.LastBlockData().TimeStart
-	mk := func(ts int64, id string, line int32, trf string) types.Order {
-		return types.Order{TimeStamp: last + ts, OrderID: id, TrxLine: line, TrfrID: trf, OrderType: "TRFR"}
+	mk := func(ts int64, trf string) types.Order {
+		return types.Order{TimeStamp: last + ts, OrderID: SingleOrderID(trf), OrderLines: 1, TrxLine: 1, TrfrID: trf, OrderType: "TRFR"}
 	}
-	for _, o := range []types.Order{mk(5, "B", 1, "t1"), mk(5, "A", 1, "t2"), mk(3, "Z", 1, "t3"),
-		mk(5, "A", 0, "t4"), mk(5, "A", 0, "t4")} {
+	in := []types.Order{mk(5, "t1"), mk(5, "t2"), mk(3, "t3"), mk(5, "t4")}
+	for _, o := range append(in, mk(5, "t4")) { // the last one is a duplicate
 		n.AddPool(o)
 	}
-	var ids []string
+	want := append([]types.Order(nil), in...)
+	sort.Slice(want, func(i, j int) bool {
+		if want[i].TimeStamp != want[j].TimeStamp {
+			return want[i].TimeStamp < want[j].TimeStamp
+		}
+		return want[i].OrderID < want[j].OrderID
+	})
+	var ids, wantIDs []string
 	for _, o := range n.PendingCopy() {
 		ids = append(ids, o.TrfrID)
 	}
-	if strings.Join(ids, ",") != "t3,t4,t2,t1" {
-		t.Fatalf("order %v", ids)
+	for _, o := range want {
+		wantIDs = append(wantIDs, o.TrfrID)
+	}
+	if strings.Join(ids, ",") != strings.Join(wantIDs, ",") {
+		t.Fatalf("order %v, want %v", ids, wantIDs)
+	}
+	// a line that claims to be part of a larger order is not admitted alone
+	bad := mk(4, "t5")
+	bad.OrderLines = 3
+	if n.AddPool(bad) || n.PendingCount() != 4 {
+		t.Fatal("an incomplete order was admitted")
 	}
 }
 

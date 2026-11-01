@@ -425,6 +425,11 @@ func (s *SummaryDB) updateChangesLocked() error {
 				// once (nosounit.pas:535-543 only indexed new records).
 				s.addIndex(b.rec, b.slot)
 			}
+			if CrashHook != nil { // a torn record: half of it reaches the disk
+				e := b.rec.Encode()
+				_, _ = f.WriteAt(e[:len(e)/2], b.slot*types.SummarySize)
+				CrashHook("sum-torn")
+			}
 			if _, werr := f.WriteAt(b.rec.Encode(), b.slot*types.SummarySize); werr != nil {
 				err = werr
 			}
@@ -433,6 +438,7 @@ func (s *SummaryDB) updateChangesLocked() error {
 			err = serr
 		}
 	}
+	Crash("sum-post")
 	s.lastOp = 0
 	if len(s.recs) > 0 {
 		s.lastOp = s.recs[0].LastOP

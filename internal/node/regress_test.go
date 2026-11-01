@@ -428,7 +428,7 @@ func TestRW_ForkChoiceConverges(t *testing.T) {
 	slot := func(i int64) int64 { return (base/600 + i) * 600 }
 	// partition: p0 builds 2,3,4 (weights 2+3+1 = 6); p1 builds 2,3 (1+2 = 3)
 	for i := int64(1); i <= 3; i++ {
-		*b.now = slot(i)
+		*b.now = slot(i) + OutOfTurnGrace
 		b.buildAt(p0, slot(i))
 	}
 	for i := int64(1); i <= 2; i++ {
@@ -467,7 +467,7 @@ func TestRW_ForkChoiceConverges(t *testing.T) {
 	pull(t, q2, q0)
 	cb := *c.now
 	cs := func(i int64) int64 { return (cb/600 + i) * 600 }
-	*c.now = cs(3)
+	*c.now = cs(3) + OutOfTurnGrace
 	c.buildAt(q1, cs(1))
 	c.buildAt(q1, cs(2))
 	c.buildAt(q2, cs(1))

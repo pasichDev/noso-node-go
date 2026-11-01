@@ -2,6 +2,7 @@ package storage
 
 import (
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/pasichDev/noso-node-go/internal/codec"
@@ -165,6 +166,21 @@ func GVTPrice(available int, toSell bool) int64 {
 		r = r * 85 / 100
 	}
 	return r
+}
+
+// Seed creates the 100 GVT records of a new chain: numbers 0 to 99, all owned
+// by owner, each with a fixed hash of its number. The same call gives the same
+// file on every node, which is what lets a replay rebuild it. The records are
+// in memory until Save.
+func (g *GVTs) Seed(owner string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.arr = make([]types.GVT, 0, 100)
+	for i := 0; i < 100; i++ {
+		num := codec.IntToStr(int64(i))
+		g.arr = append(g.arr, types.GVT{Number: num, Owner: codec.Truncate(owner, 32),
+			Hash: strings.ToUpper(crypto.SHA256String("NOSOGVT1|" + num))})
+	}
 }
 
 // Backup / RestoreBackup mirror the .bak handling of BuildNewBlock and

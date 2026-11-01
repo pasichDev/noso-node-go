@@ -43,10 +43,13 @@ func newBed(t *testing.T, k int) *bed {
 	return b
 }
 
-// slot moves the shared clock to the next block boundary and returns it.
+// slot moves the shared clock past the next block boundary, by the out-of-turn
+// grace period (a block of any proposer may then be accepted, as the tests
+// build with whichever node is at hand), and returns the boundary.
 func (b *bed) slot() int64 {
-	*b.now = (*b.now/600 + 1) * 600
-	return *b.now
+	t := (*b.now/600 + 1) * 600
+	*b.now = t + OutOfTurnGrace
+	return t
 }
 
 // buildAt makes n build its next block with an explicit (possibly past) time.

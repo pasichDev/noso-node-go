@@ -72,12 +72,23 @@ type Node struct {
 		// probeDepth is how far before the tip the next request starts while
 		// a fork is suspected; it doubles each time the branch does not link.
 		probeDepth int64
+		// probeResume, when set, is where the next request starts while a
+		// fork is suspected: the end of the last window that held only blocks
+		// we have.
+		probeResume int64
 		// staged is a branch that is not (yet) heavier than ours, kept in
-		// memory while the following windows are fetched.
-		staged      map[int64][]byte
-		stagedStart int64
+		// memory (verified, so a window is never checked twice) while the
+		// following windows are fetched.
+		staged      []cand
+		stagedBytes int64
 		stagedTip   int64
 		recovering  bool
+		// replaying is set while a journal is replayed at start: the replay
+		// must not rewrite the journal it runs from.
+		replaying bool
+		// oursKey/oursVal cache the score of our blocks above a fork.
+		oursKey string
+		oursVal int64
 	}
 
 	poolMu sync.Mutex
@@ -152,8 +163,8 @@ func NewWithConfig(root string, cfg Config) (*Node, error) {
 	n.Wallet = w
 	n.Blocks = storage.NewBlocks(n.Lay)
 	n.Summary = storage.OpenSummary(n.Lay.Summary)
-	if !storage.Exists(n.Lay.Summary) {
-		n.Summary.CreateNew(storage.Exists(n.Lay.BlockFile(0)))
+	if !storage.Exists(n.Lay.Summary) && storage.Exists(n.Lay.BlockFile(0)) {
+		n.Summary.CreateNew(true) // data of another source with block 0 only
 	}
 	n.Summary.CreateIndex()
 	if n.Opts.BlocksDB {
@@ -166,8 +177,8 @@ func NewWithConfig(root string, cfg Config) (*Node, error) {
 		n.DB.LoadIndex() // Pascal only loads the index when BlocksDB is on; empty otherwise
 	}
 	n.PSOs = storage.OpenPSOs(n.Lay.PSOs)
-	if !storage.Exists(n.Lay.BlockFile(0)) {
-		n.CreateGenesis()
+	if err := n.ensureGenesis(); err != nil {
+		return nil, err
 	}
 	n.myLastBlock = n.Blocks.LastUpdated()
 	n.UpdateMyData()
@@ -183,6 +194,7 @@ func NewWithConfig(root string, cfg Config) (*Node, error) {
 	n.noteTip(n.MyLastBlock())
 	n.Wallet.ImportFromBackup(n.Lay.RPCBakDir)
 	n.UpdateMyData()
+	n.RefreshWalletBalances()
 	return n, nil
 }
 

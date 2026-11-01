@@ -248,15 +248,14 @@ func Shares(number, reward, fees int64, masternodes int) (dev, mnsPay, mnsTotal,
 			return
 		}
 	}
-	// FIX(re2 M-4): the masternode pool is reserved whatever list the proposer
-	// publishes. Nodes that are not listed (or not there) do not enlarge the
-	// proposer's remainder: the unpaid part is burnt. Only the proposer knows
-	// the list, so the one rule that removes the incentive to shorten it is
-	// that its length does not change what the proposer earns.
-	var pool int64
+	// The masternode pool is split between the listed nodes; whatever is not
+	// paid out (no node listed, or the division remainder) stays with the
+	// miner, as in the original (mpblock.pas:352). Nothing is burnt, so the
+	// coins in existence always equal GetSupply. A proposer that lists only
+	// itself therefore earns the same as one that lists nobody: the proposers
+	// are trusted (docs/consensus.md), the list is not a check on them.
 	if number >= MNBlockStart {
-		var okPool bool
-		pool, okPool = ApplyBP(gross, GetMNsPercentage(number, ""))
+		pool, okPool := ApplyBP(gross, GetMNsPercentage(number, ""))
 		if !okPool {
 			return 0, 0, 0, 0, false
 		}
@@ -265,6 +264,6 @@ func Shares(number, reward, fees int64, masternodes int) (dev, mnsPay, mnsTotal,
 			mnsTotal = mnsPay * int64(masternodes)
 		}
 	}
-	pow = gross - dev - pool
+	pow = gross - dev - mnsTotal
 	return dev, mnsPay, mnsTotal, pow, pow >= 0
 }

@@ -127,6 +127,7 @@ func writeFileAtomic(path string, data []byte) error {
 	m, _ := atomicLocks.LoadOrStore(path, &sync.Mutex{})
 	m.(*sync.Mutex).Lock()
 	defer m.(*sync.Mutex).Unlock()
+	Crash("wfa-pre " + path)
 	tmp := path + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
@@ -144,10 +145,12 @@ func writeFileAtomic(path string, data []byte) error {
 		_ = os.Remove(tmp)
 		return werr
 	}
+	Crash("wfa-mid " + path)
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp) // FIX(re2 #14): in plain wallet mode this is a clear-text copy
 		return err
 	}
+	Crash("wfa-post " + path)
 	return syncDir(filepath.Dir(path))
 }
 

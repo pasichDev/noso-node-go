@@ -13,10 +13,13 @@ import (
 // OrderFields lists every signed field of an order in a fixed order.
 // FIX(C-04, H-07): the original signed only timestamp+origin+receiver+
 // amount+fee+line (mpprotocol.pas:792) and left the type, the reference and
-// the TrfrID outside the signature.
+// the TrfrID outside the signature. The number of lines of the wire order is
+// signed too: a proposer cannot execute a prefix of a multi-line order by
+// relabelling its first line as an order of one line.
 func OrderFields(o types.Order, origin string) []string {
 	return []string{o.OrderType, codec.IntToStr(o.TimeStamp), origin, o.Receiver,
-		codec.IntToStr(o.AmmountTrf), codec.IntToStr(o.AmmountFee), codec.IntToStr(int64(o.TrxLine)), o.Reference}
+		codec.IntToStr(o.AmmountTrf), codec.IntToStr(o.AmmountFee), codec.IntToStr(int64(o.TrxLine)), o.Reference,
+		codec.IntToStr(int64(o.OrderLines))}
 }
 
 // OrderTrfrID derives the transfer id from all signed fields. FIX(C-04): in
@@ -30,6 +33,48 @@ func OrderTrfrID(o types.Order, origin string) string {
 
 // SingleOrderID is the id of CUSTOM and SNDGVT orders.
 func SingleOrderID(trfrID string) string { return crypto.GetOrderHash("1" + trfrID) }
+
+// OrderGroupID is the id of a wire order of n lines: it commits to the line
+// count, the time and every line id, in order.
+func OrderGroupID(lines []types.Order) string {
+	ids := ""
+	for _, o := range lines {
+		ids += o.TrfrID
+	}
+	return crypto.GetOrderHash(codec.IntToStr(int64(len(lines))) + codec.IntToStr(lines[0].TimeStamp) + ids)
+}
+
+// SealOrder turns lines made one by one by SendFundsFromAddress into one wire
+// order: every line is numbered 1..n, carries the line count n, is signed again
+// by the wallet key of its sender (the count is part of the signature) and gets
+// the order id derived from all lines. All lines must pay one receiver at one
+// time with one reference. The lines are returned in order, ready for the wire.
+func (n *Node) SealOrder(lines []types.Order) ([]types.Order, error) {
+	if len(lines) < 1 || len(lines) > 30 {
+		return nil, nodeError("an order has 1 to 30 lines")
+	}
+	out := make([]types.Order, len(lines))
+	for i, o := range lines {
+		idx := n.Wallet.IndexOf(o.Address)
+		if idx < 0 {
+			return nil, nodeError("not a wallet address: " + o.Address)
+		}
+		w := n.Wallet.At(idx)
+		if w.PrivateKey == "" || o.Sender != w.PublicKey && o.Sender != w.Hash {
+			return nil, nodeError("no key for " + o.Address)
+		}
+		o.OrderLines, o.TrxLine = int32(len(lines)), int32(i+1)
+		o.Sender = w.PublicKey
+		SignOrder(&o, w.PrivateKey)
+		out[i] = o
+	}
+	id := OrderGroupID(out)
+	for i := range out {
+		out[i].OrderID = id
+		out[i].Normalize()
+	}
+	return out, nil
+}
 
 // SignOrder fills Signature and TrfrID of an order whose other fields are set.
 func SignOrder(o *types.Order, priv string) {
