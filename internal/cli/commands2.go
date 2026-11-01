@@ -809,3 +809,56 @@ func cmdWallet(d *Dispatcher, l string) {
 		d.log("Syntax: wallet [retire-legacy]")
 	}
 }
+
+// cmdMNSet: `mnset ip port fundsAddress signAddress` sets the masternode
+// options (what `docs/running-a-node.md` asks for) and saves advopt.txt.
+func cmdMNSet(d *Dispatcher, l string) {
+	ip, port, funds, sign := p(l, 1), p(l, 2), p(l, 3), p(l, 4)
+	switch {
+	case ip == "" || sign == "" || funds == "":
+		d.log("Syntax: mnset {ip} {port} {funds address} {sign address}")
+	case !codec.IsValidIP(ip):
+		d.log("Invalid IP")
+	case codec.StrToIntDef(port, -1) < 1 || codec.StrToIntDef(port, -1) > 65535:
+		d.log("Invalid port")
+	case !crypto.IsValidHashAddress(funds):
+		d.log("Invalid funds address")
+	case d.N.Wallet.IndexOf(sign) < 0:
+		d.log("The sign address must be an address of this wallet")
+	default:
+		d.N.UpdateOptions(func(o *node.StorageOptions) { o.MNIP, o.MNPort, o.MNFunds, o.MNSign = ip, port, funds, sign })
+		if err := d.N.SaveOptions(); err != nil {
+			d.log("Not saved: %v", err)
+			return
+		}
+		d.log("Masternode set: %s:%s funds %s sign %s", ip, port, funds, sign)
+	}
+}
+
+// cmdMNDelegate: `mndelegate fundsAddress signAddress`, run where the funds
+// key is, prints "fundsPublicKey signature" for `mnsetdelegation` on the
+// node that holds the sign key. The private key is never printed.
+func cmdMNDelegate(d *Dispatcher, l string) {
+	funds, sign := p(l, 1), p(l, 2)
+	i := d.N.Wallet.IndexOf(funds)
+	if i < 0 || !crypto.IsValidHashAddress(sign) {
+		d.log("Syntax: mndelegate {funds address in this wallet} {sign address}")
+		return
+	}
+	w := d.N.Wallet.At(i)
+	if w.PrivateKey == "" {
+		d.log("This wallet has no private key for that address")
+		return
+	}
+	d.log("%s %s", w.PublicKey, node.SignDelegation(w.PrivateKey, sign, funds))
+}
+
+// cmdMNSetDelegation: `mnsetdelegation fundsPublicKey signature` stores the
+// delegation for the configured funds and sign addresses.
+func cmdMNSetDelegation(d *Dispatcher, l string) {
+	if err := d.N.SetDelegation(p(l, 1), p(l, 2)); err != nil {
+		d.log("Delegation refused: %v", err)
+		return
+	}
+	d.log("Delegation stored")
+}

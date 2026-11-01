@@ -75,7 +75,7 @@ func (e *Engine) SendFunds(line string, say Printer, startIdx int) string {
 		restante := monto + comision
 		var coins int64
 		if n.Options().MultiSend {
-			h := n.Wallet.At(0).Hash
+			h := n.Wallet.At(startIdx).Hash // FIX(G3): the funds start at the selected address
 			coins = n.Summary.BalanceIndexed(h) - n.AddressPendingPays(h)
 		} else {
 			coins = e.WalletBalance()
@@ -129,6 +129,7 @@ func (e *Engine) SendFunds(line string, say Printer, startIdx int) string {
 	}
 	os = os[:len(os)-2]
 	os = strings.Replace(os, "PSK", "NSLORDER", 1)
+	say.say("Send to Node %s", os)
 	res := e.SendOrderToNode(os)
 	if strings.HasPrefix(res, "ERROR") {
 		// FIX(M2): the order was not accepted by any node; it is neither
@@ -265,7 +266,18 @@ func (e *Engine) OrderDetails(orderID string) OrderGroup {
 	n := e.N
 	var r OrderGroup
 	found := false
+	// Lines of one order are merged only when id, type, receiver and time agree
+	// (as getblockorders does): lines that merely share an id are separate
+	// orders and are not summed into one.
+	var key *types.Order
 	add := func(o types.Order, block int32, sender string) {
+		if key == nil {
+			c := o
+			key = &c
+		} else if o.OrderID != key.OrderID || o.OrderType != key.OrderType || o.Receiver != key.Receiver ||
+			o.TimeStamp != key.TimeStamp {
+			return
+		}
 		r.OrderID, r.Block, r.Reference, r.TimeStamp, r.Receiver = o.OrderID, block, o.Reference, o.TimeStamp, o.Receiver
 		if o.OrderLines == 1 {
 			r.Sender = sender

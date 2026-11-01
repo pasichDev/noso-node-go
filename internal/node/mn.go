@@ -467,6 +467,10 @@ func (n *Node) AddCheck(c MNCheck) {
 	n.mn.mu.Unlock()
 }
 
+// maxMNQueue bounds the received-IP table and the waiting reports (FIX(M-2)):
+// at 2 KiB a line, an unbounded queue was 12 MB per slot per ten minutes.
+const maxMNQueue = 4096
+
 // Received/waiting queues (nosomasternodes.pas:723-790).
 
 // MNIPReceived mirrors IsMNIPReceived (parameter 5, remembered when new).
@@ -478,6 +482,9 @@ func (n *Node) MNIPReceived(line string) bool {
 		if x == ip {
 			return true
 		}
+	}
+	if len(n.mn.received) >= maxMNQueue {
+		return true // FIX(M-2): bounded; the table is cleared every block
 	}
 	n.mn.received = append(n.mn.received, ip)
 	return false
@@ -496,7 +503,9 @@ func (n *Node) AddWaitingMN(line string) {
 		return
 	}
 	n.mn.mu.Lock()
-	n.mn.waiting = append(n.mn.waiting, line)
+	if len(n.mn.waiting) < maxMNQueue {
+		n.mn.waiting = append(n.mn.waiting, line)
+	}
 	n.mn.mu.Unlock()
 }
 

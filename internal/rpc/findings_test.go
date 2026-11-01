@@ -63,3 +63,13 @@ func TestLocalAddressAndNoPlaintextKeys(t *testing.T) {
 		t.Fatalf("plaintext key files written: %v", matches)
 	}
 }
+
+// L7: an IPv6 caller is not matched by the end-of-list marker.
+func TestL7_IPv6Whitelist(t *testing.T) {
+	if ValidRPCHost("127.0.0.1,localhost", "[::1]:5000") || ValidRPCHost("127.0.0.1", "") {
+		t.Fatal("IPv6 caller passed a whitelist without it")
+	}
+	if !ValidRPCHost("127.0.0.1,::1", "[::1]:5000") || !ValidRPCHost("127.0.0.1,localhost", "127.0.0.1:80") {
+		t.Fatal("whitelisted caller refused")
+	}
+}

@@ -117,7 +117,7 @@ func (e *Engine) SaveConnection(tipo, ip string, conn *Conn, to int) int {
 // saveConnectionPort is SaveConnection for a peer whose listening port is
 // already known (it was dialled, or it announced the port in its greeting).
 func (e *Engine) saveConnectionPort(tipo, ip string, port int, conn *Conn, to int) int {
-	p := Peer{Tipo: tipo, IP: codec.Truncate(ip, 20), LastPing: e.nowStr(), LastBlock: "0",
+	p := Peer{Tipo: tipo, IP: codec.Truncate(ip, 45), LastPing: e.nowStr(), LastBlock: "0",
 		ListeningPort: port}
 	e.peers.mu.Lock()
 	defer e.peers.mu.Unlock()

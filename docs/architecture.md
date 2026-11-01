@@ -25,7 +25,7 @@ cmd/nosod  cmd/nosocli  cmd/nosogui
 | Package | Responsibility | Original units |
 |---|---|---|
 | `codec` | Free Pascal behaviour: ShortString and little-endian record bytes, `Val`-style number parsing, the `Parameter` tokenizer | `nosogeneral` (Parameter, IsValidIP), FPC runtime |
-| `crypto` | SHA-256, RIPEMD-160, MD5, Base58/Base36 conversions (including the signed big-integer quirk), lenient Base64, secp256k1 ECDSA with SHA-1, addresses, certificates | `nosocrypto`, `mpsignerutils` |
+| `crypto` | SHA-256, RIPEMD-160, MD5, Base58/Base36 conversions (including the signed big-integer quirk), strict canonical Base64, secp256k1 ECDSA with SHA-1, addresses, certificates | `nosocrypto`, `mpsignerutils` |
 | `types` | Packed record layouts and the order text codec | records of `nosogeneral`, `nosounit`, `nosoblock`, `nosoheaders`, `nosogvts`, `nosowallcon`, `nosopsos` |
 | `storage` | Every file under `NOSODATA`, the summary database with its per-block change list | `nosounit`, `nosoheaders`, `nosogvts`, `nosowallcon`, `nosonosocfg`, `nosomasternodes` (file part), `nosopsos`, `nosoblock`, `mpdisk` |
 | `consensus` | Pure monetary rules: supply, reward, percentages, fees, block timing | `nosogeneral`, `mpblock.GetBlockReward`, `nosotime` |

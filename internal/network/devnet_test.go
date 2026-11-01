@@ -252,7 +252,14 @@ func TestDevnetOrderRestartAndPartitionHeal(t *testing.T) {
 	}
 	dest := "N3DthVsfEUtqrgWFHTEB6F88xLkT3Df"
 	var said []string
-	res := d.eng[from].SendFunds("sendto "+dest+" 100000 test", func(s string) { said = append(said, s) }, 0)
+	var res string
+	for try := 0; try < 40; try++ { // state 2 for a moment while a new block is on its way
+		res = d.eng[from].SendFunds("sendto "+dest+" 100000 test", func(s string) { said = append(said, s) }, 0)
+		if res != "ERROR 20" {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 	if strings.HasPrefix(res, "ERROR") || res == "" {
 		t.Fatalf("order not accepted: %q %v (balance %d)", res, said, d.eng[from].WalletBalance())
 	}
@@ -287,4 +294,35 @@ func TestDevnetOrderRestartAndPartitionHeal(t *testing.T) {
 	d.heal()
 	h = d.nodes[0].MyLastBlock()
 	d.waitConverged("after the partition healed", h, 120*time.Second, 0, 1, 2, 3)
+}
+
+// TestDevnetDeepForkHeals cuts the network so that the losing half builds
+// more blocks than the reorganisation depth probed at first (20) while the
+// winning half builds more; after the heal the losers fetch the winning
+// branch in windows (a not-yet-heavier branch is staged and continued) and
+// everybody ends on one chain.
+func TestDevnetDeepForkHeals(t *testing.T) {
+	if testing.Short() {
+		t.Skip("runs several minutes of chain time")
+	}
+	d := newDevnet(t, 4, 3, 400)
+	defer d.stopAll()
+	d.start(0, 1, 2, 3)
+	d.waitConverged("start", 3, 90*time.Second, 0, 1, 2, 3)
+	fork := d.nodes[0].MyLastBlock()
+	d.cut([]int{0, 1}, []int{2, 3})
+	// the lone proposer (node 2) must pile up more than 20 blocks of its own
+	deadline := time.Now().Add(240 * time.Second)
+	for time.Now().Before(deadline) && d.nodes[2].MyLastBlock() < fork+24 {
+		time.Sleep(500 * time.Millisecond)
+	}
+	if d.nodes[2].MyLastBlock() < fork+24 {
+		t.Fatalf("the minority half did not get 24 blocks deep: %s", d.status())
+	}
+	if d.nodes[0].MyLastBlockHash() == d.nodes[2].MyLastBlockHash() {
+		t.Fatal("no fork")
+	}
+	d.heal()
+	h := d.nodes[0].MyLastBlock()
+	d.waitConverged("after the deep fork healed", h, 180*time.Second, 0, 1, 2, 3)
 }

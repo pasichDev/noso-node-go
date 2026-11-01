@@ -23,6 +23,7 @@ import (
 	"github.com/pasichDev/noso-node-go/internal/cli"
 	"github.com/pasichDev/noso-node-go/internal/codec"
 	"github.com/pasichDev/noso-node-go/internal/consensus"
+	"github.com/pasichDev/noso-node-go/internal/control"
 	"github.com/pasichDev/noso-node-go/internal/logx"
 	"github.com/pasichDev/noso-node-go/internal/network"
 	"github.com/pasichDev/noso-node-go/internal/node"
@@ -41,6 +42,8 @@ type App struct {
 	d *cli.Dispatcher
 
 	dataDir string
+	lock    *storage.DirLock // exclusive hold on the data directory for the life of the window
+	ctl     *control.Server  // control socket, so nosocli talks to this node instead of opening the files
 
 	mu         sync.Mutex
 	consoleBuf []string
@@ -124,8 +127,10 @@ func (a *App) showStartup() {
 	step := func(s string) { fyne.Do(func() { list.SetText(list.Text + s + "\n") }) }
 	start.OnTapped = func() {
 		start.Disable()
+		typed := []byte(pass.Text)
+		pass.SetText("") // FIX(G6): the passphrase does not stay in the entry
 		go func() {
-			if err := a.startNode([]byte(pass.Text), plain.Checked, step); err != nil {
+			if err := a.startNode(typed, plain.Checked, step); err != nil {
 				step("x " + err.Error())
 				fyne.Do(func() { start.Enable() })
 				return
@@ -141,13 +146,22 @@ func (a *App) showStartup() {
 // startNode mirrors StartProgram (masterpaskalform.pas:1648-1742).
 func (a *App) startNode(pass []byte, plain bool, step func(string)) error {
 	step("Opening data directory " + a.dataDir)
+	// FIX(C3, G1): one process owns the data directory; nosocli beside the GUI
+	// is refused (or, through the control socket below, served by this node).
+	lock, err := storage.LockDataDir(a.dataDir)
+	if err != nil {
+		return err
+	}
 	if err := cli.CheckNewPassphrase(a.dataDir, pass); err != nil { // finding 20
+		_ = lock.Close()
 		return err
 	}
 	n, err := node.NewWithConfig(a.dataDir, node.Config{WalletPassphrase: pass, InsecurePlainWallet: plain})
 	if err != nil {
+		_ = lock.Close()
 		return err
 	}
+	a.lock = lock
 	step("✓ Files tree ok")
 	step("✓ Wallet, summary, headers, masternodes and GVTs files ok")
 	n.EnsureRPCTokens()
@@ -177,6 +191,17 @@ func (a *App) startNode(pass []byte, plain bool, step func(string)) error {
 		fyne.Do(func() { a.shutdown() })
 	}
 	a.r.Restart = nil
+	if w := n.Wallet.LegacyWarning(); w != "" {
+		a.appendLog("console", w)
+	}
+	for _, w := range n.Wallet.Warnings() {
+		a.appendLog("console", w)
+	}
+	if ctl, err := control.Serve(control.SocketPath(a.dataDir), func(line string, out func(string)) { a.d.RunTo(line, out) }); err == nil {
+		a.ctl = ctl
+	} else {
+		a.appendLog("console", "control socket unavailable: "+err.Error())
+	}
 	step("✓ GUI initialized")
 	if !a.headless {
 		e.UpdateTimeOffset(n.CFG.Param(2))
@@ -230,13 +255,15 @@ func trimBuf(b []string) []string {
 // runCommand executes a console line through the shared dispatcher and
 // shows its output in the console tab (ProcessLinesAdd).
 func (a *App) runCommand(line string) {
-	a.d.RunTo(line, func(s string) {
-		if cli.Sensitive(line) && !strings.HasPrefix(s, ">>") {
-			a.appendLog("console", s) // shown to the user, but never written to a file
-			return
-		}
-		a.appendLog("console", s)
-	})
+	if cli.Sensitive(line) {
+		// FIX(G6): key material is shown once, in a window of its own, and
+		// never enters the console buffer (which Copy and Clear operate on).
+		var out []string
+		a.d.RunTo(line, func(s string) { out = append(out, s) })
+		fyne.Do(func() { dialog.ShowInformation("Output of a sensitive command", strings.Join(out, "\n"), a.win) })
+		return
+	}
+	a.d.RunTo(line, func(s string) { a.appendLog("console", s) })
 }
 
 func (a *App) info(s string) {
@@ -300,6 +327,12 @@ func (a *App) shutdown() {
 			a.r.Stop()
 			a.e.Stop()
 			_ = os.WriteFile(a.n.Lay.ClosedMarker, nil, 0o644)
+			if a.ctl != nil {
+				_ = a.ctl.Close()
+			}
+			if a.lock != nil {
+				_ = a.lock.Close()
+			}
 		}
 		a.fa.Quit()
 	})

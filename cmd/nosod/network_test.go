@@ -247,7 +247,14 @@ func TestNetworkOfProcesses(t *testing.T) {
 		return false
 	})
 	dest := "N3DthVsfEUtqrgWFHTEB6F88xLkT3Df"
-	res := from.rpcCall(t, "RPCSpendToken", "sendfunds", dest, "100000", "test")
+	var res string
+	for try := 0; try < 60; try++ { // ERROR 20: the node is a moment behind a new block
+		res = from.rpcCall(t, "RPCSpendToken", "sendfunds", dest, "100000", "test")
+		if !strings.Contains(res, `"result":20`) {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 	if !strings.Contains(res, "OR") || strings.Contains(res, "ERROR") {
 		t.Fatalf("sendfunds: %s", res)
 	}

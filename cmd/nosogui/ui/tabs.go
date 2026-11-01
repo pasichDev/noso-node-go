@@ -12,6 +12,7 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
 
+	"github.com/pasichDev/noso-node-go/internal/cli"
 	"github.com/pasichDev/noso-node-go/internal/codec"
 	"github.com/pasichDev/noso-node-go/internal/consensus"
 	"github.com/pasichDev/noso-node-go/internal/crypto"
@@ -76,7 +77,15 @@ func (a *App) walletTab() fyne.CanvasObject {
 		e := widget.NewEntry()
 		e.SetPlaceHolder("alias (5-40 characters)")
 		dlg := widget.NewForm(widget.NewFormItem("Alias", e))
-		fdialog(a, "Customize "+x, dlg, func() { a.runCommand("Customize " + x + " " + e.Text) })
+		fdialog(a, "Customize "+x, dlg, func() {
+			// FIX(G2): the command splits at blanks, so "hello world" would
+			// have registered "hello" (irreversible, paid): refuse blanks
+			if strings.ContainsAny(e.Text, " \t") {
+				a.info("An alias cannot contain spaces")
+				return
+			}
+			a.runCommand("Customize " + x + " " + e.Text)
+		})
 	})
 	cp := widget.NewButton("Copy", func() {
 		if x := addr(); x != "" {
@@ -155,6 +164,13 @@ func (a *App) walletTab() fyne.CanvasObject {
 		if (crypto.IsValidHashAddress(dest.Text) || a.n.AliasAlreadyExists(dest.Text)) && ok &&
 			v <= consensus.GetMaximunToSend(a.e.WalletBalance()) {
 			ref.SetText(codec.Parameter(ref.Text, 0))
+			// FIX(G3): the source is shown; the send starts at the selected
+			// address and continues with the others only if it cannot cover it
+			src := a.selAddr
+			if src == "" {
+				src = a.n.Wallet.At(0).Hash
+			}
+			conf.SetText("Confirm (from " + src + ")")
 			set(true)
 		} else {
 			a.info("Invalid parameters")
@@ -165,11 +181,21 @@ func (a *App) walletTab() fyne.CanvasObject {
 		line := fmt.Sprintf("SENDTO %s %d %s", dest.Text, v, ref.Text)
 		a.appendLog("console", ">> "+line)
 		start := sendStart(walletHashes(a.n), a.selAddr) // the original starts at the selected address
-		go a.e.SendFunds(line, func(s string) { a.appendLog("console", s) }, start)
-		dest.SetText("")
-		amount.SetText("0.00000000")
-		ref.SetText("")
-		set(false)
+		// FIX(M2): the form is cleared only when a node took the order; on an
+		// error the form stays and the reason is shown.
+		go func() {
+			res := a.e.SendFunds(line, func(s string) { a.appendLog("console", s) }, start)
+			fyne.Do(func() {
+				if strings.HasPrefix(res, "OR") {
+					dest.SetText("")
+					amount.SetText("0.00000000")
+					ref.SetText("")
+				} else {
+					a.info("Not sent: " + res)
+				}
+				set(false)
+			})
+		}()
 	})
 	cancel = widget.NewButton("Cancel", func() { set(false) })
 	a.sendBtn, a.confBtn = send, conf
@@ -232,7 +258,9 @@ func (a *App) consoleTab() fyne.CanvasObject {
 		if s == "" {
 			return
 		}
-		a.lastCmd = s
+		if !cli.Sensitive(s) { // F3 must not keep a command that carries a key
+			a.lastCmd = s
+		}
 		go a.runCommand(s)
 	}
 	clear := widget.NewButton("Clear", func() { // ConsolePopUpClear

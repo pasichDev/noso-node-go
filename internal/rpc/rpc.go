@@ -146,17 +146,28 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 // ValidRPCHost mirrors mpcoin.pas:398-414: the ip must appear in the comma
 // separated whitelist.
 func ValidRPCHost(whitelist, host string) bool {
-	hostIP := codec.Parameter(strings.ReplaceAll(host, ":", " "), 0)
-	wl := strings.ReplaceAll(whitelist, ",", " ")
-	for i := int64(0); ; i++ {
-		t := codec.Parameter(wl, i)
-		if t == hostIP {
+	// FIX(L7): the host is split with the standard library, so "[::1]:8078"
+	// gives "::1" (it used to give "", which matched the end-of-list marker
+	// and passed any IPv6 caller). Addresses are compared as addresses.
+	h := host
+	if hh, _, err := net.SplitHostPort(host); err == nil {
+		h = hh
+	}
+	h = strings.Trim(h, "[]")
+	if h == "" {
+		return false
+	}
+	hip := net.ParseIP(h)
+	for _, t := range strings.Split(strings.ReplaceAll(whitelist, " ", ""), ",") {
+		t = strings.Trim(t, "[]")
+		if t == "" {
+			continue
+		}
+		if t == h || (hip != nil && net.ParseIP(t) != nil && net.ParseIP(t).Equal(hip)) {
 			return true
 		}
-		if t == "" {
-			return false
-		}
 	}
+	return false
 }
 
 // ErrorString mirrors GetJSONErrorString.

@@ -33,7 +33,7 @@ type pullState struct {
 const pullRetry = 10
 
 // pullTimeout is how long one request may stay unanswered.
-const pullTimeout = 30
+const pullTimeout = 10
 
 // maxStrikes invalid answers close a connection.
 const maxStrikes = 3
@@ -169,9 +169,15 @@ func (e *Engine) blocksReceived(sl int, data []byte) bool {
 			st.probed, st.strikes, st.keyAt = false, 0, 0
 		}
 	case err == nil:
-		// nothing new, or a branch that is not preferred: do not ask again
-		// for this pair of tips.
-		if peerTip != "" {
+		// Nothing new. If a branch is being staged (it is not heavier yet) the
+		// next window continues it from its tip, so ask the same peer again
+		// at once; only when the peer has nothing beyond that is the pair of
+		// tips given up on.
+		from := n.BlocksRequestFrom()
+		peerLast := codec.StrToInt64Def(e.peers.get(sl).LastBlock, -1)
+		if st != nil && !n.ForkProbe() && from != n.MyLastBlock() && from < peerLast {
+			st.keyAt = 0
+		} else if peerTip != "" {
 			e.markRejected(peerTip + "|" + n.MyLastBlockHash())
 		}
 	case errors.Is(err, node.ErrForkParent):

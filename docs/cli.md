@@ -12,8 +12,11 @@ the temp directory). If there is none, it opens the data directory itself
 ("offline mode"): wallet, chain and hash commands work, network commands say
 that they need a running node.
 
-Do not use offline mode on a data directory that a daemon is using without a
-control socket.
+Offline mode takes the exclusive lock of the data directory first. If a daemon
+(or the GUI, which also serves a control socket) holds the directory, `nosocli`
+refuses with a message instead of becoming a second writer of the wallet and
+chain files. Status-style commands (`status`, `balance`, `showwallet`,
+`pubkey`, ...) open the wallet read-only.
 
 Commands are case insensitive; arguments are blank separated. The list below
 is the dispatch table of the original `ParseCommandLine`; `nosocli -list`
@@ -22,15 +25,15 @@ prints the exact set.
 | Group | Commands |
 |---|---|
 | General | `ver`, `status`, `timestamp`, `osversion`, `offset`, `useroptions`, `saveadv`, `restart`, `myhash`, `system power\|mem\|downspeed` |
-| Network | `serveron`, `serveroff`, `forceserver`, `nodes`, `bots`, `delbots`, `connectto ip [port]`, `disconnect`, `myip`, `peers`, `autoserveron`, `autoserveroff`, `consensus`, `constats`, `isallsynced` |
-| Wallet | `newaddress`, `balance`, `showwallet`, `impwallet file`, `expwallet name`, `setdefault addr`, `showkeys addr`, `expkeys addr`, `webwal`, `exportaddress addr`, `newfromkeys pub priv`, `validate addr`, `getcert addr`, `checkcert cert`, `getmulti n,m addrs`, `customize addr alias`, `sendto dest amount [reference]`, `sendgvt n dest` |
+| Network | `serveron`, `serveroff`, `forceserver` (not needed: `Autoserver True` opens the server at start), `nodes`, `bots`, `delbots`, `connectto ip [port]`, `disconnect`, `denypeer host:port` (close, refuse and do not dial; no argument lists), `allowpeer host:port\|all`, `myip`, `peers`, `autoserveron`, `autoserveroff`, `consensus`, `constats`, `isallsynced` |
+| Wallet | `newaddress`, `balance`, `showwallet`, `impwallet file`, `expwallet name`, `setdefault addr`, `showkeys addr`, `expkeys addr`, `webwal`, `exportaddress addr`, `newfromkeys pub priv`, `validate addr`, `pubkey [addr]` (address and public key only), `wallet [retire-legacy]`, `getcert addr`, `checkcert cert`, `getmulti n,m addrs`, `customize addr alias`, `sendto dest amount [reference]`, `sendgvt n dest` |
 | Chain | `lbinfo`, `block n`, `resumen [n]`, `headsize`, `order id`, `ordersources id`, `ordinfo id`, `address addr\|alias`, `history addr [blocks]`, `totalfees`, `supply`, `halving`, `getpos [n]`, `getmns [n]`, `gmts amount`, `sumary`, `sumindexsize`, `funds`, `freezed`, `pending`, `blockpos n`, `blockmns n`, `getdblb` |
 | GVT | `listgvt`, `gvtinfo` |
-| Masternodes | `mnschecks`, `tt` |
+| Masternodes | `mnschecks`, `tt`, `mnset ip port funds sign`, `mndelegate funds sign`, `mnsetdelegation fundsPub signature` |
 | Hashes | `sha256 text`, `md5 text`, `md160 text`, `base58sum text`, `addfrompub key`, `testhash n`, `compare key` |
 | Config | `nosocfg`, `setmode`, `addnode`, `delnode`, `addpool`, `delpool`, `addnosopay`, `delnosopay`, `restorecfg`, `clearcfg n`, `getreposeeds`, `forcereposeeds`, `directive text` |
 | RPC | `rpcon`, `rpcoff`, `setrpcport port` |
-| Maintenance | `undoblock`, `rebuildsum`, `zipsumary`, `restoresumary`, `restoreblockchain`, `testhead` |
+| Maintenance | `undoblock`, `rebuildsum`, `zipsumary`, `restoresumary`, `restoreblockchain confirm` (deletes the chain and everything derived from it; only in a program that can restart the node, i.e. `nosod`), `testhead` |
 | PSO | `newpso`, `listpsos`, `clearpsos`, `showpsos` |
 | Other | `tp`, `post`, `clear`, `closestarton`, `closestartoff`, `setport`, `showpending` |
 | Not supported | `update`, `getbeta`, `checkupdates`, `sendreport`, `testnet` (see port-status) |

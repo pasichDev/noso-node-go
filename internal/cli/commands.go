@@ -125,8 +125,11 @@ func init() {
 				d.log("denied: %s", strings.Join(d.E.DeniedPeers(), " "))
 			}
 		},
-		"PUBKEY": cmdPubKey,
-		"WALLET": cmdWallet,
+		"PUBKEY":          cmdPubKey,
+		"MNSET":           cmdMNSet,
+		"MNDELEGATE":      cmdMNDelegate,
+		"MNSETDELEGATION": cmdMNSetDelegation,
+		"WALLET":          cmdWallet,
 		"MYIP": func(d *Dispatcher, l string) {
 			if d.needNet() {
 				d.log("%s", d.E.GetMyIP())
