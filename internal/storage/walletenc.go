@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"golang.org/x/crypto/argon2"
 
@@ -194,10 +195,8 @@ func OpenWalletEncryptedOpts(plainPath string, pass []byte, o WalletOpenOptions)
 		}
 	}
 	w.legacyKept = ""
-	for _, p := range []string{plainPath, plainPath + ".bak"} {
-		if Exists(p) {
-			w.legacyKept = plainPath
-		}
+	if len(legacyWalletFiles(plainPath)) > 0 {
+		w.legacyKept = plainPath
 	}
 	if !o.ReadOnly {
 		tightenFiles(encPath, encPath+".bak", plainPath, plainPath+".bak")
@@ -364,7 +363,7 @@ func (w *Wallet) LegacyWarning() string {
 	if w.legacyKept == "" {
 		return ""
 	}
-	return "WARNING: " + w.legacyKept + " (and its .bak) still hold your private keys in clear text. " +
+	return "WARNING: clear-text copies of your private keys remain (" + strings.Join(legacyWalletFiles(w.legacyKept), ", ") + "). " +
 		"Once wallet.enc is verified, remove them with: nosocli wallet retire-legacy"
 }
 
@@ -404,14 +403,43 @@ func verifyKeys(records []byte) error {
 	return nil
 }
 
-// RetireLegacyWallet removes the clear-text wallet.pkw, wallet.pkw.bak and
-// wallet.pkw.tmp after the caller explicitly asked for it. It first decrypts
-// wallet.enc with pass and checks that every record of every one of those
-// files is in it with the same private key; if any file holds a key that
-// wallet.enc lacks, everything stays and an error names the file. Files are
-// overwritten with zeros, synced and removed; a file that could not be
-// overwritten or removed is reported and left in place. Nothing calls this
-// automatically (Wallet.RetireLegacy is the CLI entry point).
+// legacyWalletFiles lists the clear-text copies of the wallet that exist next
+// to plainPath: wallet.pkw, its .bak and .tmp, the files a damaged or
+// replaced wallet was kept as (wallet.pkw.damaged-*, wallet.pkw.bak.*.old) and
+// the key backups under SUMMARKS/RPC. Links are listed too; Retire refuses
+// them.
+func legacyWalletFiles(plainPath string) []string {
+	var out []string
+	for _, p := range []string{plainPath, plainPath + ".bak", plainPath + ".tmp"} {
+		if _, err := os.Lstat(p); err == nil {
+			out = append(out, p)
+		}
+	}
+	for _, pat := range []string{plainPath + ".damaged-*", plainPath + ".bak.*.old"} {
+		m, _ := filepath.Glob(pat)
+		out = append(out, m...)
+	}
+	rpc := filepath.Join(filepath.Dir(plainPath), "SUMMARKS", "RPC")
+	if ents, err := os.ReadDir(rpc); err == nil {
+		for _, e := range ents {
+			if !e.IsDir() && filepath.Ext(e.Name()) == ".pkw" {
+				out = append(out, filepath.Join(rpc, e.Name()))
+			}
+		}
+	}
+	return out
+}
+
+// RetireLegacyWallet removes the clear-text copies of the wallet (see
+// legacyWalletFiles) after the caller explicitly asked for it. It first
+// decrypts wallet.enc with pass and checks every one of those files: it must
+// be a link-free regular file made of whole records only (a torn tail may hold
+// a key that cannot be compared, so such a file is refused, not shredded), and
+// every record must be in wallet.enc with the same private key. If any file
+// fails, everything stays and an error names the file. Files are overwritten
+// with zeros, synced and removed; a file that could not be overwritten or
+// removed is reported and left in place. Nothing calls this automatically
+// (Wallet.RetireLegacy is the CLI entry point).
 func RetireLegacyWallet(plainPath string, pass []byte) error {
 	encPath := filepath.Join(filepath.Dir(plainPath), "wallet.enc")
 	disk, err := os.ReadFile(encPath)
@@ -431,21 +459,29 @@ func RetireLegacyWallet(plainPath string, pass []byte) error {
 		inEnc[r.Hash] = r.PrivateKey
 	}
 	var targets []string
-	for _, p := range []string{plainPath, plainPath + ".bak", plainPath + ".tmp"} {
-		raw, err := os.ReadFile(p)
-		if errors.Is(err, fs.ErrNotExist) {
-			continue
+	for _, p := range legacyWalletFiles(plainPath) {
+		name := filepath.Base(p)
+		st, err := os.Lstat(p)
+		if err != nil {
+			return err
 		}
+		if !st.Mode().IsRegular() {
+			return fmt.Errorf("wallet: %s is not a regular file (a link or special file is never followed); nothing removed", name)
+		}
+		raw, err := os.ReadFile(p)
 		if err != nil {
 			return err
 		}
 		if p == plainPath && len(raw)/types.WalletSize == 0 {
 			return errors.New("wallet: wallet.pkw holds no records; nothing removed")
 		}
-		recs, _ := splitRecords(raw)
+		recs, whole := splitRecords(raw)
+		if !whole {
+			return fmt.Errorf("wallet: %s has %d bytes after its last whole record that cannot be compared with wallet.enc; move it aside by hand once its content is saved; nothing removed", name, len(raw)%types.WalletSize)
+		}
 		for _, r := range recs {
 			if k, ok := inEnc[r.Hash]; !ok || k != r.PrivateKey {
-				return fmt.Errorf("wallet: %s holds a key (%s) that wallet.enc does not; nothing removed", filepath.Base(p), r.Hash)
+				return fmt.Errorf("wallet: %s holds a key (%s) that wallet.enc does not; nothing removed", name, r.Hash)
 			}
 		}
 		targets = append(targets, p)
@@ -467,13 +503,20 @@ func RetireLegacyWallet(plainPath string, pass []byte) error {
 // reports a failure at any step and removes the file only after a successful
 // overwrite.
 func shred(path string) error {
-	st, err := os.Stat(path)
+	st, err := os.Lstat(path)
 	if err != nil {
 		return err
+	}
+	if !st.Mode().IsRegular() {
+		return errors.New("not a regular file; links are never followed")
 	}
 	f, err := os.OpenFile(path, os.O_WRONLY, 0)
 	if err != nil {
 		return err
+	}
+	if fst, err := f.Stat(); err != nil || !os.SameFile(st, fst) { // swapped for a link since the check
+		_ = f.Close()
+		return errors.New("file changed while being shredded; left in place")
 	}
 	_, werr := f.Write(make([]byte, st.Size()))
 	if serr := f.Sync(); werr == nil {

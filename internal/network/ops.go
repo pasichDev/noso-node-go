@@ -445,7 +445,7 @@ func OrderErrorText(res string) string {
 		"ERROR 1":   "not enough spendable funds (amount plus fee, minus orders still waiting for a block)",
 		"ERROR 2":   "the same order is already waiting",
 		"ERROR 3":   "the order is older than the last block",
-		"ERROR 4":   "the last block ended more than 10 minutes ago, so no new order is accepted until the next block arrives; a proposer is probably down, try again in a few minutes",
+		"ERROR 4":   "the order is dated more than a minute ahead of this node's clock; check the clock",
 		"ERROR 5":   "the same order was mined recently",
 		"ERROR 7":   "negative amount",
 		"ERROR 8":   "negative fee",

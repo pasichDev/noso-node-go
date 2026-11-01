@@ -194,12 +194,14 @@ func TestWrongParentGarbageIsStruck(t *testing.T) {
 	w, _ := zw.Create("1.blk")
 	_, _ = w.Write(b.Encode())
 	_ = zw.Close()
-	for i := 0; i < 4; i++ {
-		e.blocksReceived(sl, zb.Bytes())
+	// An unsealed block is no sibling on another branch, whatever its parent
+	// says: the peer is struck out at once.
+	if e.blocksReceived(sl, zb.Bytes()) {
+		t.Fatal("a peer that sent an unsealed block was kept")
 	}
 	st := e.pullStateOf(e.slotObj(sl))
-	if st.faults < 2 {
-		t.Fatalf("garbage with a wrong parent was struck %d times", st.faults)
+	if st.strikes < maxStrikes {
+		t.Fatalf("an unsealed block was struck %d times", st.strikes)
 	}
 	claim(e, sl, "3", crypto.IDHash("tip"))
 	e.syncBlocks()

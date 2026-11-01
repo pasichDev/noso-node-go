@@ -75,7 +75,10 @@ func (n *Node) ClearMNsList() {
 	n.mn.mu.Unlock()
 }
 
-// IPMNAlreadyProcessed mirrors IsIPMNAlreadyProcessed (parameter 5).
+// IPMNAlreadyProcessed mirrors IsIPMNAlreadyProcessed (parameter 5). FIX(F-5):
+// it only asks. The IP is recorded by MarkIPMNProcessed once the report has
+// answered its MNVER challenge; recording it before let a report that named
+// another node's IP, and then failed the challenge, take that node's slot.
 func (n *Node) IPMNAlreadyProcessed(line string) bool {
 	ip := codec.Parameter(line, 5)
 	n.mn.mu.Lock()
@@ -85,8 +88,22 @@ func (n *Node) IPMNAlreadyProcessed(line string) bool {
 			return true
 		}
 	}
-	n.mn.ipsProc = append(n.mn.ipsProc, ip)
 	return false
+}
+
+// MarkIPMNProcessed records the IP of a report whose challenge was answered.
+func (n *Node) MarkIPMNProcessed(line string) {
+	ip := codec.Parameter(line, 5)
+	n.mn.mu.Lock()
+	defer n.mn.mu.Unlock()
+	for _, x := range n.mn.ipsProc {
+		if x == ip {
+			return
+		}
+	}
+	if len(n.mn.ipsProc) < maxMNQueue {
+		n.mn.ipsProc = append(n.mn.ipsProc, ip)
+	}
 }
 
 // ClearMNIPProcessed mirrors ClearMNIPProcessed.
@@ -497,17 +514,31 @@ func (n *Node) ClearReceivedMNs() {
 	n.mn.mu.Unlock()
 }
 
-// AddWaitingMN mirrors AddWaitingMNs.
+// AddWaitingMN mirrors AddWaitingMNs. FIX(F-5): a report does not take its
+// IP's slot by being queued. It is refused when the IP already answered a
+// challenge this block (MNIPReceived) or the same line is already waiting; the
+// slot is taken by MarkMNIPReceived after the challenge.
 func (n *Node) AddWaitingMN(line string) {
-	if n.MNIPReceived(line) {
-		return
-	}
+	ip := codec.Parameter(line, 5)
 	n.mn.mu.Lock()
+	defer n.mn.mu.Unlock()
+	for _, x := range n.mn.received {
+		if x == ip {
+			return
+		}
+	}
+	for _, w := range n.mn.waiting {
+		if w == line {
+			return
+		}
+	}
 	if len(n.mn.waiting) < maxMNQueue {
 		n.mn.waiting = append(n.mn.waiting, line)
 	}
-	n.mn.mu.Unlock()
 }
+
+// MarkMNIPReceived records the IP of a report that answered its challenge.
+func (n *Node) MarkMNIPReceived(line string) { n.MNIPReceived(line) }
 
 // WaitingMNsLen mirrors LengthWaitingMNs.
 func (n *Node) WaitingMNsLen() int {

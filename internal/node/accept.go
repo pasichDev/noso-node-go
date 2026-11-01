@@ -19,6 +19,11 @@ import (
 // the caller should ask for blocks from further back (BlocksRequestFrom).
 var ErrForkParent = errors.New("received blocks do not continue our chain")
 
+// ErrUnsealed is returned for a received block that is not sealed by a listed
+// proposer (no trailer, an unlisted key, a bad signature). It is not a block
+// of another branch: the network layer strikes a peer that sends one.
+var ErrUnsealed = errors.New("block is not sealed by a listed proposer")
+
 // ForkProbe reports that a peer showed us blocks on another branch, so the
 // next request should start before our tip.
 func (n *Node) ForkProbe() bool {
@@ -231,6 +236,18 @@ func (n *Node) acceptRunLocked(byNum map[int64][]byte) (int, error) {
 		if err == nil && blk.Header.Number != num {
 			err = bad("file %d.blk holds block %d", num, blk.Header.Number)
 		}
+		// FIX: the seal is checked before the link. A block that is not sealed
+		// by a listed proposer is no sibling on another branch, whatever its
+		// parent says: it is reported as ErrUnsealed so the sync layer can
+		// strike the peer at once instead of treating it as a fork.
+		var idx int
+		if err == nil {
+			if !blk.V2 || len(blk.Keys) != len(blk.Orders) {
+				err = errors.Join(ErrUnsealed, bad("block has no authentication trailer"))
+			} else if idx, err = n.checkSeal(blk); err != nil {
+				err = errors.Join(ErrUnsealed, err)
+			}
+		}
 		if err == nil && blk.Header.LastBlockHash != prevHash {
 			err = bad("parent hash %q != %q", blk.Header.LastBlockHash, prevHash)
 			if len(pre) == 0 {
@@ -245,14 +262,6 @@ func (n *Node) acceptRunLocked(byNum map[int64][]byte) (int, error) {
 		}
 		if err == nil && blk.Header.TimeEnd > now+5 {
 			err = bad("block %d is from the future", num)
-		}
-		var idx int
-		if err == nil {
-			if !blk.V2 || len(blk.Keys) != len(blk.Orders) {
-				err = bad("block has no authentication trailer")
-			} else {
-				idx, err = n.checkSeal(blk)
-			}
 		}
 		if err == nil && (len(pre) >= maxStaged || preBytes+int64(len(raw)) > maxStagedBytes) {
 			err = errStagingLimit

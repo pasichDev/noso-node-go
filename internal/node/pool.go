@@ -9,6 +9,10 @@ import (
 	"github.com/pasichDev/noso-node-go/internal/types"
 )
 
+// OrderClockTolerance is how far ahead of the node's clock an order may be
+// dated when it is admitted to the pool.
+const OrderClockTolerance = 60
+
 // PendingCount mirrors GetPendingCount.
 func (n *Node) PendingCount() int {
 	n.poolMu.Lock()
@@ -311,7 +315,11 @@ func (n *Node) ValidateTrfr(o types.Order, origen string) int {
 		return 2
 	case o.TimeStamp < last.TimeStart:
 		return 3
-	case o.TimeStamp > last.TimeEnd+600:
+	case o.TimeStamp > n.UTCTime()+OrderClockTolerance:
+		// FIX: the bound was last.TimeEnd+600, which refused every order once
+		// the tip was more than a slot old (a proposer down). Pool admission
+		// is local policy; block validation does not use it (checkOrder bounds
+		// an order by the time of the block that holds it, deterministically).
 		return 4
 	case n.TrxSeenRecently(o.TrfrID):
 		return 5

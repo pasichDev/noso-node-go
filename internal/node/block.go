@@ -832,10 +832,12 @@ func (n *Node) completeSummaryLocked() error {
 			// with everything after it, and the summary is restored.
 			_ = n.restoreSnapshot("complete")
 			if n.removeBlocksLocked(i) < 0 {
-				// FIX(H-04): the bad block lies below the finality horizon;
-				// it cannot be removed on the word of local replay alone.
+				// FIX(H-04): the bad block is inside the local guard (20 blocks
+				// below the highest tip this node reached, see Finalized); it is
+				// not removed on the word of local replay alone. This is a guard
+				// of the node's own files, not a finality of the chain.
 				n.markCorrupt()
-				n.logf("exceps", "block "+codec.IntToStr(i)+" cannot be replayed and is final: chain data inconsistent")
+				n.logf("exceps", "block "+codec.IntToStr(i)+" cannot be replayed and is inside the local undo guard: chain data inconsistent")
 				return errors.Join(ErrCorrupt, err)
 			}
 			n.UpdateMyData()
@@ -929,7 +931,7 @@ func (n *Node) rebuildLocked(upTo int64, onBlock func(int64)) error {
 
 // UndoLastBlock mirrors UndoneLastBlock (mpblock.pas:692-744), restoring the
 // state files of the snapshot taken before that block. A block at or below the
-// finality horizon is never undone.
+// local guard (Finalized: 20 below the highest tip reached) is never undone.
 func (n *Node) UndoLastBlock() {
 	n.chainMu.Lock()
 	defer n.chainMu.Unlock()
@@ -975,7 +977,7 @@ const MaxReorgDepth = 20
 
 // RemoveBlocks deletes the blocks from upTo upward, restores the state to
 // just before upTo and returns how many were removed, or -1 when upTo is at
-// or below the finality horizon (nothing is changed then). Block 0 is never
+// or below the local guard (Finalized; nothing is changed then). Block 0 is never
 // removed.
 func (n *Node) RemoveBlocks(upTo int64) int {
 	n.chainMu.Lock()

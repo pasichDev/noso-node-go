@@ -725,3 +725,83 @@ func TestFinal_ResealedTipIsRepairedAtStart(t *testing.T) {
 		t.Fatalf("the headers file still names the old tip block: %v", err)
 	}
 }
+
+// final-security F-5: a report that names another node's IP and then fails the
+// challenge must not take that node's slot.
+func TestFinal_FailedReportDoesNotBurnTheIPSlot(t *testing.T) {
+	b := newBed(t, 1)
+	n := b.nodes[0]
+	att := "PSK 2 v 1 $MNREPO 8.8.8.8 8080 attackersign"
+	vic := "PSK 2 v 1 $MNREPO 8.8.8.8 8080 victimsign"
+	n.AddWaitingMN(att)
+	if n.PopWaitingMN() != att || n.IPMNAlreadyProcessed(att) {
+		t.Fatal("the attacker's report was not queued, or marked before its challenge")
+	}
+	// its challenge failed: nothing is recorded
+	n.AddWaitingMN(vic)
+	if n.WaitingMNsLen() != 1 {
+		t.Fatal("the victim's real report was refused: the IP slot was burnt")
+	}
+	line := n.PopWaitingMN()
+	if n.IPMNAlreadyProcessed(line) {
+		t.Fatal("the victim's report is already processed")
+	}
+	// its challenge succeeded: the slot is taken, a later report for the IP is not queued
+	n.MarkIPMNProcessed(line)
+	n.MarkMNIPReceived(line)
+	n.AddWaitingMN(att)
+	if n.WaitingMNsLen() != 0 || !n.IPMNAlreadyProcessed(att) {
+		t.Fatal("an answered IP can be taken again")
+	}
+}
+
+// A proposer that is down for several slots must not stop the pool: an order
+// dated now is admitted although the tip is old; one dated far ahead is not.
+func TestFinal_OrdersAreAdmittedWhileTheTipIsStale(t *testing.T) {
+	b := newBed(t, 1)
+	a := b.nodes[0]
+	for i := 0; i < 3; i++ {
+		b.build(a)
+	}
+	*b.now += 600 * 5 // five slots without a block
+	w := a.Wallet.At(0)
+	dest, _ := addr(t)
+	mk := func(ts int64) types.Order {
+		o, err := a.SendFundsFromAddress(w.Hash, dest.Hash, 100000000, 1000000, "ref", strconv.FormatInt(ts, 10), 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		o.OrderID = SingleOrderID(o.TrfrID)
+		return o
+	}
+	if c := a.ValidateTrfr(mk(*b.now-5), w.Hash); c != 0 {
+		t.Fatalf("a current order is refused with code %d", c)
+	}
+	if c := a.ValidateTrfr(mk(*b.now+3600), w.Hash); c != 4 {
+		t.Fatalf("a far-future order gets code %d, want 4", c)
+	}
+	if c := a.ValidateTrfr(mk(*b.now+OrderClockTolerance-1), w.Hash); c != 0 {
+		t.Fatalf("an order inside the tolerance gets code %d", c)
+	}
+}
+
+// An unsealed block is not a block of another branch, even with a wrong parent.
+func TestFinal_UnsealedBlockIsDistinctFromAForkParent(t *testing.T) {
+	b := newBed(t, 2)
+	a, f := b.nodes[0], b.nodes[1]
+	b.build(a)
+	pull(t, f, a)
+	ts := b.slot()
+	blk := forge(t, a, ts, nil, nil)
+	blk.Header.LastBlockHash = "NOT-OUR-PARENT"
+	_, err := f.AcceptBlocks(map[int64][]byte{blk.Header.Number: blk.Encode()})
+	if !errors.Is(err, ErrUnsealed) || errors.Is(err, ErrForkParent) {
+		t.Fatalf("unsealed block with a wrong parent: %v", err)
+	}
+	_, sw, _ := a.sealer()
+	sealBlock(blk, sw.PublicKey, sw.PrivateKey)
+	_, err = f.AcceptBlocks(map[int64][]byte{blk.Header.Number: blk.Encode()})
+	if !errors.Is(err, ErrForkParent) || errors.Is(err, ErrUnsealed) {
+		t.Fatalf("sealed block with a wrong parent: %v", err)
+	}
+}

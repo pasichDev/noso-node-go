@@ -269,6 +269,8 @@ func (e *Engine) mnLoop() {
 			}
 			line := n.PopWaitingMN()
 			if !n.IPMNAlreadyProcessed(line) && e.challengeReport(line) {
+				n.MarkIPMNProcessed(line) // FIX(F-5): the slot is taken only by a report that answered
+				n.MarkMNIPReceived(line)
 				if info := n.CheckMNReport(line, n.MyLastBlock()); info != "" {
 					e.OutgoingAdd(node.PTCHeader(n) + info)
 				}

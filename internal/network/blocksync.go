@@ -231,8 +231,7 @@ func (e *Engine) slotNumber(s *slot) int {
 
 // blocksReceived handles the archive a peer sent for our request. It returns
 // false only for a peer that keeps sending invalid blocks. A peer on another
-// branch, a branch below our finality horizon, or a branch that is not
-// heavier than ours are normal events and never cost the connection.
+// branch or a branch that is not heavier than ours are normal events and never cost the connection.
 func (e *Engine) blocksReceived(sl int, data []byte) bool {
 	n := e.N
 	s := e.slotObj(sl)
@@ -295,6 +294,10 @@ func (e *Engine) blocksReceived(sl int, data []byte) bool {
 	}
 	e.syncMu.Lock()
 	st.strikes++
+	if errors.Is(err, node.ErrUnsealed) {
+		st.strikes = maxStrikes // an unsealed block is not a fork: no second chance
+		st.fault(e.now())
+	}
 	over := st.strikes >= maxStrikes
 	e.syncMu.Unlock()
 	if over {

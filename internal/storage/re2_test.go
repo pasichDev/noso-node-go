@@ -382,3 +382,70 @@ func TestRE2ImportChecksKeys(t *testing.T) {
 		t.Errorf("ImportFromBackup took %d records with a foreign key", n)
 	}
 }
+
+// final-security F-7: a key that only a torn tail holds is not shredded; the
+// other clear-text copies are found; links are never followed.
+func TestFinalRetireRefusesATornTail(t *testing.T) {
+	d := t.TempDir()
+	p := filepath.Join(d, "wallet.pkw")
+	a, b := tRec(), tRec()
+	os.WriteFile(p, tPKW(a), 0o600)
+	pass := []byte("pw12345678")
+	if _, err := OpenWalletFor(p, pass, false, WalletOpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	// .bak: one whole record plus a torn tail that holds the whole key of b
+	torn := append(tPKW(a), tPKW(b)[:625]...)
+	os.WriteFile(p+".bak", torn, 0o600)
+	if err := RetireLegacyWallet(p, pass); err == nil || !Exists(p+".bak") || !Exists(p) {
+		t.Fatalf("a file with an unparsed tail was shredded (err=%v)", err)
+	}
+}
+
+func TestFinalRetireCoversEveryCopyAndNeverFollowsLinks(t *testing.T) {
+	d := t.TempDir()
+	p := filepath.Join(d, "wallet.pkw")
+	a := tRec()
+	os.WriteFile(p, tPKW(a), 0o600)
+	pass := []byte("pw12345678")
+	if _, err := OpenWalletFor(p, pass, false, WalletOpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	rpc := filepath.Join(d, "SUMMARKS", "RPC")
+	os.MkdirAll(rpc, 0o700)
+	copies := []string{p + ".damaged-123", p + ".bak.456.old", filepath.Join(rpc, "x.pkw")}
+	for _, c := range copies {
+		os.WriteFile(c, tPKW(a), 0o600)
+	}
+	w, _ := OpenWalletFor(p, pass, false, WalletOpenOptions{})
+	if w.LegacyWarning() == "" {
+		t.Fatal("no warning although clear-text copies remain")
+	}
+	// a link in place of a copy: refused, and its target is left alone
+	victim := filepath.Join(t.TempDir(), "victim")
+	os.WriteFile(victim, []byte("precious"), 0o600)
+	link := filepath.Join(rpc, "link.pkw")
+	if err := os.Symlink(victim, link); err != nil {
+		t.Skip("no symlinks")
+	}
+	if err := RetireLegacyWallet(p, pass); err == nil {
+		t.Fatal("a link was accepted")
+	}
+	if b, _ := os.ReadFile(victim); string(b) != "precious" {
+		t.Fatal("the link target was overwritten")
+	}
+	for _, c := range append(copies, p) {
+		if !Exists(c) {
+			t.Fatalf("%s removed although the retire was refused", c)
+		}
+	}
+	os.Remove(link)
+	if err := RetireLegacyWallet(p, pass); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range append(copies, p) {
+		if Exists(c) {
+			t.Fatalf("%s still holds a clear-text key", c)
+		}
+	}
+}

@@ -25,12 +25,10 @@ import (
 var ErrNoProposers = errors.New("no proposer keys configured: peer blocks cannot be authenticated")
 
 // ErrCorrupt is returned once local data was found inconsistent and could not
-// be repaired; the node stops touching its chain until it is rebuilt. The text
-// says "finality horizon" for the 20-block guard of the operator commands
-// (undoblock, removeblocks, replay repair), which is not a finality of the
-// chain: fork choice has none (docs/consensus.md). The wording stays because
-// the network package matches it.
-var ErrCorrupt = errors.New("local chain data inconsistent below the finality horizon")
+// be repaired; the node stops touching its chain until it is rebuilt. The
+// chain has no finality: this is about the node's own files, and the 20-block
+// guard of the operator commands (undoblock, removeblocks, replay repair).
+var ErrCorrupt = errors.New("local chain data inconsistent and not repairable by replay; rebuild the node")
 
 const proposersFile = "proposers.txt"
 
@@ -358,6 +356,6 @@ func (n *Node) markCorrupt() {
 	n.chainState.mu.Unlock()
 }
 
-// Corrupt reports that local data failed a replay below the finality
-// horizon; sync stops trying and the operator must rebuild the node.
+// Corrupt reports that local data failed a replay and could not be repaired;
+// sync stops trying and the operator must rebuild the node.
 func (n *Node) Corrupt() bool { return n.isCorrupt() }
