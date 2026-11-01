@@ -85,7 +85,7 @@ func (d *BlocksDB) Add(block, order, source, target int32) bool {
 	if _, err = f.WriteAt(types.DBRecord{Block: block, OrderID: order, Source: source, Target: target}.Encode(), off); err != nil {
 		return false
 	}
-	if err = f.Sync(); err != nil {
+	if err = syncFile(f); err != nil {
 		return false
 	}
 	d.index[order] = append(d.index[order], block)

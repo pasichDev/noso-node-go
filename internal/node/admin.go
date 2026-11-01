@@ -7,6 +7,7 @@ import (
 
 	"github.com/pasichDev/noso-node-go/internal/codec"
 	"github.com/pasichDev/noso-node-go/internal/crypto"
+	"github.com/pasichDev/noso-node-go/internal/storage"
 )
 
 // Errors returned for rejected signed administrative data.
@@ -32,7 +33,7 @@ func (n *Node) readSeq(name string) int64 {
 }
 
 func (n *Node) writeSeq(name string, v int64) error {
-	return os.WriteFile(n.seqFile(name), []byte(codec.IntToStr(v)), 0o600)
+	return storage.WriteFileAtomic(n.seqFile(name), []byte(codec.IntToStr(v)))
 }
 
 // CFGFields are the signed fields of a configuration. FIX(C-01): the

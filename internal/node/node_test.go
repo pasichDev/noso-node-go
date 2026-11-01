@@ -16,6 +16,9 @@ func newTestNode(t *testing.T, now *int64) *Node {
 		t.Fatal(err)
 	}
 	n.SetClock(func() int64 { return *now })
+	if err := n.SetProposers([]string{n.Wallet.At(0).PublicKey}); err != nil {
+		t.Fatal(err)
+	}
 	return n
 }
 
@@ -107,19 +110,15 @@ func TestBuildTransferBlockAndReplay(t *testing.T) {
 		writeFile(t, b.Lay.BlockFile(i), raw)
 	}
 	b.SetMyLastBlock(2)
-	b.Summary.CreateNew(true) // block-0 premine on the genesis account
-	b.Summary.CreateIndex()
-	for i := int64(1); i <= 2; i++ {
-		if err := b.AddBlockToSummary(i, true); err != nil {
-			t.Fatal(err)
-		}
+	if err := b.RebuildSummary(); err != nil {
+		t.Fatal(err)
 	}
 	if b.Summary.BalanceIndexed(miner) != a.Summary.BalanceIndexed(miner) ||
 		b.Summary.BalanceIndexed(dest) != a.Summary.BalanceIndexed(dest) {
 		t.Fatal("replayed balances differ")
 	}
 	// FIX(M-11): the replay touches the same account as the build path.
-	if b.Summary.AddressLastOP(storageGenesis) != 2 || b.Summary.Len() != a.Summary.Len()-1 {
+	if b.Summary.AddressLastOP(storageGenesis) != 2 || b.Summary.Len() != a.Summary.Len() {
 		t.Fatalf("replay genesis LastOP=%d len b=%d a=%d", b.Summary.AddressLastOP(storageGenesis), b.Summary.Len(), a.Summary.Len())
 	}
 	if a.Summary.AddressLastOP(storageGenesis) != 2 {

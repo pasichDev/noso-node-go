@@ -208,7 +208,17 @@ func (n *Node) buildLocked(number, timestamp int64, targetHash, miner, solution 
 		return nil, bad("cannot build block %d on top of %d", number, myLast)
 	}
 	sIdx, sw, sealed := n.sealer()
-	if sealed && number > 0 {
+	if number > 0 {
+		// FIX(re2 4, 9): no unsealed blocks, no block off the schedule grid.
+		if len(n.Proposers()) == 0 {
+			return nil, ErrNoProposers
+		}
+		if !sealed {
+			return nil, bad("this wallet holds no proposer key")
+		}
+		if timestamp%consensus.SecondsPerBlock != 0 || timestamp <= prev.TimeEnd {
+			return nil, bad("block time %d is not a later slot boundary", timestamp)
+		}
 		miner = crypto.GetAddressFromPublicKey(sw.PublicKey, 0)
 	}
 
@@ -216,12 +226,18 @@ func (n *Node) buildLocked(number, timestamp int64, targetHash, miner, solution 
 	if number != 0 {
 		startBlockTime = prev.TimeEnd + 1
 	}
-	if err := n.snapshot(codec.IntToStr(number)); err != nil {
+	label := codec.IntToStr(number)
+	if err := n.snapshot(label); err != nil {
 		return nil, err
+	}
+	if number > 0 {
+		if err := n.beginJournal(label, myLast); err != nil {
+			return nil, err
+		}
 	}
 	rollback := func(headerAdded bool) {
 		n.Summary.ResetBlockRecords()
-		_ = n.restoreSnapshot(codec.IntToStr(number))
+		_ = n.restoreSnapshot(label)
 		if number > 0 {
 			n.Blocks.Delete(number)
 		}
@@ -230,6 +246,9 @@ func (n *Node) buildLocked(number, timestamp int64, targetHash, miner, solution 
 		}
 		n.SetMyLastBlock(myLast)
 		n.UpdateMyData()
+		if number > 0 {
+			n.endJournal()
+		}
 	}
 	_ = n.Summary.Backup()
 	_ = n.GVTs.Backup()
@@ -245,41 +264,79 @@ func (n *Node) buildLocked(number, timestamp int64, targetHash, miner, solution 
 	var minerFee int64
 	var blockTrfrs, gvts int
 	seen := map[string]bool{}
+	debit := map[string]int64{}
 	if number > 0 {
-		for _, ord := range pool {
-			if ord.TimeStamp < prev.TimeStart || lastTrxs[ord.TrfrID] || seen[ord.TrfrID] {
-				continue
+		for gi := 0; gi < len(pool); {
+			// A wire order is a group of lines that is taken or left whole.
+			first := pool[gi]
+			cnt := 1
+			if first.OrderType == "TRFR" {
+				cnt = int(first.OrderLines)
+				if cnt < 1 || cnt > 30 || gi+cnt > len(pool) {
+					gi++
+					continue
+				}
 			}
-			if ord.TimeStamp+60 > timestamp || blockTrfrs >= consensus.MaxTransfersPerBlock ||
-				(ord.OrderType == "SNDGVT" && gvts >= consensus.MaxGVTPerBlock) {
-				if ord.TimeStamp < timestamp+600 {
-					ignored = append(ignored, ord)
+			group := pool[gi : gi+cnt]
+			gi += cnt
+			if skip, defer_ := n.groupNotNow(group, prev, timestamp, lastTrxs, seen, blockTrfrs, gvts); skip {
+				if defer_ {
+					ignored = append(ignored, group...)
 				}
 				continue
 			}
-			key := ord.Sender
-			if checkOrder(ord, prev, timestamp) != nil {
+			var gl []types.Order
+			var gk []string
+			okGroup := true
+			for _, ord := range group {
+				if checkOrder(ord, prev, timestamp) != nil {
+					okGroup = false
+					break
+				}
+				k := ord.Sender
+				ord.Block = int32(number)
+				ord.AssignSender(ord.Address)
+				gl = append(gl, ord)
+				gk = append(gk, k)
+			}
+			if !okGroup || checkOrderGroups(gl) != nil || !n.groupApplies(gl, debit) {
 				continue
 			}
-			ord.Block = int32(number)
-			ord.AssignSender(ord.Address)
-			fee, ok, err := n.applyOrder(ord, number)
-			if err != nil {
-				rollback(false)
-				return nil, err
+			var gfee int64
+			skipGroup := false
+			for _, ord := range gl {
+				fee, ok, err := n.applyOrder(ord, number)
+				if err != nil {
+					rollback(false)
+					return nil, err
+				}
+				if !ok {
+					if ord.OrderType != "TRFR" { // a single order that does not apply: nothing was changed
+						skipGroup = true
+						break
+					}
+					rollback(false)
+					return nil, stateErr("order %s passed the dry run and then failed", ord.TrfrID)
+				}
+				gfee += fee
+				if ord.OrderType == "TRFR" {
+					debit[ord.Address] += ord.AmmountFee + ord.AmmountTrf
+				} else {
+					debit[ord.Address] += fee
+				}
+				seen[ord.TrfrID] = true
+				if ord.OrderType == "SNDGVT" {
+					gvts++
+				} else {
+					blockTrfrs++
+				}
 			}
-			if !ok {
+			if skipGroup {
 				continue
 			}
-			seen[ord.TrfrID] = true
-			minerFee += fee
-			if ord.OrderType == "SNDGVT" {
-				gvts++
-			} else {
-				blockTrfrs++
-			}
-			list = append(list, ord)
-			keys = append(keys, key)
+			minerFee += gfee
+			list = append(list, gl...)
+			keys = append(keys, gk...)
 		}
 	}
 
@@ -291,7 +348,7 @@ func (n *Node) buildLocked(number, timestamp int64, targetHash, miner, solution 
 	var mnsAddrs []string
 	var mnsText string
 	if number >= consensus.MNBlockStart {
-		mnsText, mnsAddrs = n.paidMNs(myLast)
+		mnsText, mnsAddrs = n.paidMNs(number)
 	}
 	dev, mnsPay, pow, newMNs, err := n.applyEnd(number, miner, minerFee, mnsAddrs)
 	if err != nil {
@@ -311,24 +368,17 @@ func (n *Node) buildLocked(number, timestamp int64, targetHash, miner, solution 
 	// to stakers and the whole share stays with the miner. The original
 	// divided by zero here and stopped (mpblock.pas:294-298); on a chain that
 	// must keep growing that is replaced by this explicit rule.
-	switch {
-	case number == 0:
-		h.Difficult = consensus.InitialBlockDiff
-	case number < 53000:
-		h.Difficult = 0
-	default:
-		h.Difficult = 0
-	}
-	h.TargetHash = codec.Truncate(targetHash, 32)
-	mnsTotal := int64(len(mnsAddrs)) * mnsPay
-	h.Solution = codec.Truncate(solution+" FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF1 "+codec.IntToStr(pow)+" "+
-		codec.IntToStr(mnsTotal)+" 0", 200)
 	if number == 0 {
-		h.Solution = ""
+		h.Difficult = consensus.InitialBlockDiff
 		h.LastBlockHash = "NOSO GENESYS BLOCK"
+		h.TargetHash = codec.Truncate(targetHash, 32)
 	} else {
+		// FIX(re2 3): the caller's target and solution are not used; the
+		// header is a function of the chain (see ValidateBlock).
+		h.TargetHash = codec.Truncate(prevHash, 32)
 		h.LastBlockHash = codec.Truncate(prevHash, 32)
 	}
+	_, _ = solution, targetHash
 	if number >= 53000 {
 		h.NxtBlkDiff = int32(len(mnsAddrs))
 	}
@@ -339,9 +389,6 @@ func (n *Node) buildLocked(number, timestamp int64, targetHash, miner, solution 
 	blk := &storage.Block{Header: h, Orders: list, MNsPay: mnsPay, MNsAddrs: mnsAddrs}
 	if number > 0 {
 		blk.V2, blk.Keys = true, keys
-		if sealed {
-			sealBlock(blk, sw.PublicKey, sw.PrivateKey)
-		}
 	}
 	_ = sIdx
 	if err := n.Summary.UpdateChanges(); err != nil {
@@ -349,6 +396,20 @@ func (n *Node) buildLocked(number, timestamp int64, targetHash, miner, solution 
 		return nil, err // FIX(M-12): stop on a failed write (nosounit.pas:549-553)
 	}
 	n.Summary.SetLastOp(number)
+	if err := n.persistDerived(number, gvts > 0); err != nil {
+		rollback(false)
+		return nil, err
+	}
+	if number > 0 {
+		// The block commits to the state it produces, then is sealed.
+		blk.Header.Solution = solutionFor(n.stateRoot(), proposersDigest(n.Proposers()))
+		sealBlock(blk, sw.PublicKey, sw.PrivateKey)
+		raw := blk.Encode()
+		if err := n.commitJournal(label, myLast, number, map[int64][]byte{number: raw}); err != nil {
+			rollback(false)
+			return nil, err
+		}
+	}
 	if err := n.Blocks.Write(blk); err != nil {
 		n.logf("exceps", "*****CRITICAL***** Error building block: "+codec.IntToStr(number))
 		rollback(false)
@@ -361,10 +422,12 @@ func (n *Node) buildLocked(number, timestamp int64, targetHash, miner, solution 
 	n.UpdateMyData()
 	n.Summary.SetHash()
 	if !n.Headers.Add(number, n.MyLastBlockHash(), n.Summary.Hash()) {
-		rollback(false)
+		rollback(true)
 		return nil, errHeaderWrite
 	}
-	n.persistDerived(number, gvts > 0)
+	if number > 0 {
+		n.endJournal() // the change is complete: chain and state agree
+	}
 	n.noteTip(number)
 	n.pruneSnapshots(number)
 
@@ -389,14 +452,63 @@ func (n *Node) buildLocked(number, timestamp int64, targetHash, miner, solution 
 		PoWReward: pow, MNsReward: mnsPay, DevReward: dev}, nil
 }
 
+// groupNotNow reports whether a group of pool lines is left out of this block,
+// and whether it is kept in the pool for a later one.
+func (n *Node) groupNotNow(group []types.Order, prev types.BlockHeader, timestamp int64, lastTrxs, seen map[string]bool, blockTrfrs, gvts int) (skip, keep bool) {
+	first := group[0]
+	if first.TimeStamp < prev.TimeStart {
+		return true, false
+	}
+	ids := map[string]bool{}
+	for _, o := range group {
+		if lastTrxs[o.TrfrID] || seen[o.TrfrID] || ids[o.TrfrID] {
+			return true, false
+		}
+		ids[o.TrfrID] = true
+	}
+	if first.TimeStamp+60 > timestamp ||
+		(first.OrderType == "SNDGVT" && gvts+len(group) > consensus.MaxGVTPerBlock) ||
+		(first.OrderType != "SNDGVT" && blockTrfrs+len(group) > consensus.MaxTransfersPerBlock) {
+		return true, first.TimeStamp < timestamp+600
+	}
+	return false, false
+}
+
+// groupApplies is the dry run of a group: a wire order is taken whole or not
+// at all. Lines of one order pay distinct senders (PTCOrder), so the funds of
+// one line do not depend on another.
+func (n *Node) groupApplies(group []types.Order, debit map[string]int64) bool {
+	senders := map[string]bool{}
+	for _, o := range group {
+		if o.OrderType != "TRFR" {
+			return true // single orders are checked by applyOrder itself
+		}
+		total, ok := consensus.CheckedAdd(o.AmmountFee, o.AmmountTrf)
+		// ValidPay debits, so the dry run counts on the committed balance
+		// minus what this block already took from the sender. Credits earlier
+		// in the block are ignored: the check may refuse a group the
+		// sequential rules would take, never the reverse.
+		if slot, _ := n.Summary.GetIndexPosition(o.Address, false); slot < 0 {
+			return false // unknown account: ValidPay would refuse it
+		}
+		if !ok || senders[o.Address] || !ValidReceiver(o.Receiver) || n.Summary.BalanceIndexed(o.Address)-debit[o.Address] < total {
+			return false
+		}
+		senders[o.Address] = true
+	}
+	return true
+}
+
 // persistDerived writes the files derived from the chain besides the
 // summary: GVT owners, masternode locks and their expiry.
-func (n *Node) persistDerived(number int64, gvtMoved bool) {
+func (n *Node) persistDerived(number int64, gvtMoved bool) error {
 	if gvtMoved {
-		n.GVTs.Save()
+		if err := n.GVTs.Save(); err != nil {
+			return err
+		}
 	}
 	n.lastExpired = n.PSOs.ClearExpired(int(number))
-	n.PSOs.Save(int(number))
+	return n.PSOs.Save(int(number))
 }
 
 // CheckForMyPending mirrors mpcoin.pas:306-338 (wallet pending totals).
@@ -441,7 +553,17 @@ func (n *Node) addBlockToSummaryLocked(number int64, saveAndUpdate bool) error {
 				return err
 			}
 		}
-		n.persistDerived(number, moved)
+		if err := n.persistDerived(number, moved); err != nil {
+			return err
+		}
+		if saveAndUpdate {
+			// FIX(re2 1): replay checks the state root the block committed to.
+			if root, _, ok := parseSolution(blk.Header.Solution); !ok {
+				return stateErr("block %d carries no state root", number)
+			} else if root != n.stateRoot() {
+				return stateErr("block %d: state root differs from the replay", number)
+			}
+		}
 		if number%1000 == 0 {
 			_ = copyFile(n.Lay.Summary, n.Lay.MarksDir+"/"+codec.IntToStr(number)+".bak")
 		}
@@ -566,7 +688,7 @@ func (n *Node) replayLegacy(number int64, blk *storage.Block, readErr error, sav
 		_ = copyFile(n.Lay.Summary, n.Lay.MarksDir+"/"+codec.IntToStr(number)+".bak")
 	}
 	if gvts > 0 {
-		n.GVTs.Save()
+		return n.GVTs.Save()
 	}
 	return nil
 }
@@ -630,7 +752,15 @@ func (n *Node) RebuildSummary() error {
 	return n.rebuildSummaryLocked()
 }
 
-func (n *Node) rebuildSummaryLocked() error {
+func (n *Node) rebuildSummaryLocked() error { return n.rebuildLocked(n.MyLastBlock(), nil) }
+
+// rebuildLocked replays blocks 0..upTo from the block files into the state
+// files. FIX(re2 6): every block is committed before the next is applied, as
+// in forward validation, so MNEligible sees the same balances in both and the
+// replay of a valid chain cannot fail where acceptance succeeded. V2 blocks
+// are checked against the state root they carry. onBlock runs after each
+// block (0 included).
+func (n *Node) rebuildLocked(upTo int64, onBlock func(int64)) error {
 	if err := n.snapshot("rebuild"); err != nil {
 		return err
 	}
@@ -640,7 +770,6 @@ func (n *Node) rebuildSummaryLocked() error {
 		n.UpdateMyData()
 		return err
 	}
-	last := n.MyLastBlock()
 	goChain := false
 	if blk, err := n.Blocks.Read(1); err == nil && blk.V2 {
 		goChain = true
@@ -665,19 +794,16 @@ func (n *Node) rebuildSummaryLocked() error {
 	} else {
 		n.Summary.CreateNew(storage.Exists(n.Lay.BlockFile(0)))
 	}
-	for i := int64(1); i <= last; i++ {
-		if err := n.addBlockToSummaryLocked(i, false); err != nil {
+	if onBlock != nil {
+		onBlock(0)
+	}
+	for i := int64(1); i <= upTo; i++ {
+		if err := n.addBlockToSummaryLocked(i, true); err != nil {
 			return fail(err)
 		}
-		if i%100 == 0 {
-			if err := n.Summary.UpdateChanges(); err != nil {
-				return fail(err)
-			}
-			n.Summary.ResetBlockRecords()
+		if onBlock != nil {
+			onBlock(i)
 		}
-	}
-	if err := n.Summary.UpdateChanges(); err != nil {
-		return fail(err)
 	}
 	n.Summary.ResetBlockRecords()
 	n.UpdateMyData()

@@ -1,8 +1,10 @@
 package node
 
 import (
+	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/pasichDev/noso-node-go/internal/consensus"
@@ -147,7 +149,9 @@ func forge(t *testing.T, n *Node, ts int64, orders []types.Order, keys []string)
 		LastBlockHash: n.MyLastBlockHash(), AccountMiner: crypto.GetAddressFromPublicKey(sw.PublicKey, 0),
 		Reward: consensus.GetBlockReward(num), MinerFee: fees}
 	h.TimeTotal = int32(h.TimeEnd - h.TimeStart)
+	h.TargetHash = n.MyLastBlockHash()
 	blk := &storage.Block{Header: h, Orders: orders, V2: true, Keys: keys, MNsPay: mnsPay}
+	restamp(n, blk)
 	sealBlock(blk, sw.PublicKey, sw.PrivateKey)
 	return blk
 }
@@ -165,4 +169,34 @@ func signedOrder(t *testing.T, w types.Wallet, typ, receiver, ref string, amount
 	o.OrderID = SingleOrderID(o.TrfrID)
 	o.Sender = o.Address
 	return o, w.PublicKey
+}
+
+// restamp recomputes the state root a (possibly edited) block must carry:
+// the block is applied to a scratch copy of the state, which is then put back.
+// A block that does not apply keeps a placeholder root and is refused for the
+// real reason first. The caller seals again.
+func restamp(n *Node, blk *storage.Block) {
+	num := blk.Header.Number
+	if num >= 53000 {
+		blk.Header.NxtBlkDiff = int32(len(blk.MNsAddrs))
+	}
+	blk.Header.Solution = solutionFor(strings.Repeat("0", 64), proposersDigest(n.Proposers()))
+	// The state root the block must carry: apply it to a scratch copy of the
+	// state and put the state back. A block that does not apply keeps the
+	// placeholder, which is refused for the real reason first.
+	n.chainMu.Lock()
+	if n.snapshot("forge") == nil {
+		n.Summary.ResetBlockRecords()
+		if moved, err := n.applyBlockState(blk); err == nil && n.Summary.UpdateChanges() == nil {
+			n.Summary.SetLastOp(num)
+			if n.persistDerived(num, moved) == nil {
+				blk.Header.Solution = solutionFor(n.stateRoot(), proposersDigest(n.Proposers()))
+			}
+		}
+		n.Summary.ResetBlockRecords()
+		_ = n.restoreSnapshot("forge")
+		n.UpdateMyData()
+		_ = os.RemoveAll(n.undoDir("forge"))
+	}
+	n.chainMu.Unlock()
 }

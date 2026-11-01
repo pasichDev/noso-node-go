@@ -484,11 +484,24 @@ func (s *Server) blockOrders(p string) string {
 		block, lines               int32
 		trf, fee                   int64
 	}
+	// FIX(re2 H-2): lines are merged into one order only when they agree on id,
+	// receiver, type and time (a block of this chain guarantees it; a legacy
+	// or foreign block may not). Fields are cleaned of the record separators
+	// so a field can never start another record.
+	clean := func(v string) string {
+		return strings.Map(func(r rune) rune {
+			if r == 0x7f || r == ' ' || r == '\x00' || r < 0x20 {
+				return '_'
+			}
+			return r
+		}, v)
+	}
 	var groups []*grp
 	for _, o := range orders {
+		o.OrderID, o.Reference, o.Sender, o.Receiver, o.Address = clean(o.OrderID), clean(o.Reference), clean(o.Sender), clean(o.Receiver), clean(o.Address)
 		var g *grp
 		for _, x := range groups {
-			if x.id == o.OrderID {
+			if x.id == o.OrderID && x.recv == o.Receiver && x.typ == o.OrderType && x.ts == o.TimeStamp {
 				g = x
 				break
 			}

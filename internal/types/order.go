@@ -84,3 +84,25 @@ func tooLong(o Order) bool {
 	return len(o.OrderID) > 64 || len(o.OrderType) > 6 || len(o.Reference) > 64 || len(o.Sender) > 120 ||
 		len(o.Address) > 40 || len(o.Receiver) > 40 || len(o.Signature) > 120 || len(o.TrfrID) > 64
 }
+
+// ValidReference reports whether s may be the Reference of a new order. FIX(re2
+// H-2): the field is copied into text that is split again on '$', ' ', ':',
+// '(' , ')' and 0x7f (wire lines, NSLBLKORD, the RPC objects), so a byte of
+// those lets a sender write the next record. Only a plain printable set is
+// accepted: letters, digits and _ - . , @ + * = # / ! ? % & [ ] { } ~ ^ | < >.
+// At most 64 bytes, not empty.
+func ValidReference(s string) bool {
+	if s == "" || len(s) > 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
+		case c < 0x80 && strings.IndexByte("_-.,@+*=#/!?%&[]{}~^|<>", c) >= 0:
+		default:
+			return false
+		}
+	}
+	return true
+}

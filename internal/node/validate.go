@@ -39,6 +39,9 @@ func checkOrder(o types.Order, prev types.BlockHeader, blockTime int64) error {
 	if _, ok := consensus.CheckedAdd(o.AmmountTrf, o.AmmountFee); !ok {
 		return errors.New("amount range")
 	}
+	if !types.ValidReference(o.Reference) {
+		return errors.New("reference has characters that are not allowed")
+	}
 	if o.TimeStamp < prev.TimeStart || o.TimeStamp+60 > blockTime {
 		return errors.New("order time outside the block window")
 	}
@@ -104,6 +107,22 @@ func (n *Node) ValidateBlock(b *storage.Block, prev types.BlockHeader, prevHash 
 	if int(h.TrxTotales) != len(b.Orders) {
 		return bad("order count")
 	}
+	// FIX(re2 3, 1): every header field is a function of the chain except the
+	// time slot, the miner and the orders. Nothing is left to grind, and the
+	// state root and the proposer list digest are committed.
+	if _, digest, ok := parseSolution(h.Solution); !ok || digest != proposersDigest(n.Proposers()) {
+		return bad("solution field is not the state commitment of this chain")
+	}
+	if h.TargetHash != codec.Truncate(prevHash, 32) || h.Difficult != 0 || h.TimeLast20 != 0 {
+		return bad("header fields that must be fixed are not")
+	}
+	var wantNxt int32
+	if h.Number >= 53000 {
+		wantNxt = int32(len(b.MNsAddrs))
+	}
+	if h.NxtBlkDiff != wantNxt {
+		return bad("next difficulty field")
+	}
 	if len(b.PosAddrs) != 0 || b.PosPay != 0 {
 		return bad("proof-of-stake payments")
 	}
@@ -149,6 +168,9 @@ func (n *Node) ValidateBlock(b *storage.Block, prev types.BlockHeader, prevHash 
 			return bad("fee total out of range")
 		}
 	}
+	if err := checkOrderGroups(user); err != nil {
+		return err
+	}
 	if transfers > consensus.MaxTransfersPerBlock || gvts > consensus.MaxGVTPerBlock {
 		return bad("too many orders (%d transfers, %d gvt)", transfers, gvts)
 	}
@@ -187,4 +209,43 @@ func (n *Node) ValidateBlock(b *storage.Block, prev types.BlockHeader, prevHash 
 	return nil
 }
 
-var _ = codec.IntToStr
+// checkOrderGroups binds OrderID, OrderLines and TrxLine, which the order
+// signature does not cover. FIX(re2 H-2, 10): lines that share an OrderID are
+// one wire order and must pay one receiver at one time; the group must be
+// complete, numbered 1..n in order and carry the id derived from its lines.
+// A proposer can therefore not attach a line to someone else's order, relabel
+// it, or make one order pay two receivers.
+func checkOrderGroups(user []types.Order) error {
+	for i := 0; i < len(user); {
+		g := user[i]
+		n := int(g.OrderLines)
+		if g.OrderType != "TRFR" {
+			if n != 1 || g.TrxLine != 1 || g.OrderID != SingleOrderID(g.TrfrID) {
+				return bad("order %d: id or line numbers do not match", i)
+			}
+			i++
+			continue
+		}
+		if n < 1 || n > 30 || i+n > len(user) {
+			return bad("order %d: %d lines declared", i, n)
+		}
+		ids := ""
+		for j := 0; j < n; j++ {
+			o := user[i+j]
+			if o.OrderType != "TRFR" || o.OrderID != g.OrderID || int(o.OrderLines) != n || int(o.TrxLine) != j+1 ||
+				o.Receiver != g.Receiver || o.TimeStamp != g.TimeStamp || o.Reference != g.Reference {
+				return bad("order %d: lines of one order differ", i+j)
+			}
+			ids += o.TrfrID
+		}
+		if i+n < len(user) && user[i+n].OrderID == g.OrderID {
+			return bad("order %d: more lines than declared", i)
+		}
+		derived := crypto.GetOrderHash(codec.IntToStr(int64(n)) + codec.IntToStr(g.TimeStamp) + ids)
+		if g.OrderID != derived && !(n == 1 && g.OrderID == SingleOrderID(g.TrfrID)) {
+			return bad("order %d: id is not derived from its lines", i)
+		}
+		i += n
+	}
+	return nil
+}

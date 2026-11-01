@@ -134,7 +134,7 @@ func writeFileAtomic(path string, data []byte) error {
 	}
 	_ = f.Chmod(0o600) // a stale tmp may have been created with another mode
 	_, werr := f.Write(data)
-	if serr := f.Sync(); werr == nil { // FIX(M-12): flush before the rename
+	if serr := syncFile(f); werr == nil { // FIX(M-12): flush before the rename
 		werr = serr
 	}
 	if cerr := f.Close(); werr == nil {
@@ -162,7 +162,7 @@ func syncDir(dir string) error {
 	if err != nil {
 		return err
 	}
-	err = d.Sync()
+	err = syncFile(d)
 	if cerr := d.Close(); err == nil {
 		err = cerr
 	}

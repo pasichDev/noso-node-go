@@ -69,6 +69,15 @@ type Node struct {
 		proposers []string
 		corrupt   bool
 		probe     bool
+		// probeDepth is how far before the tip the next request starts while
+		// a fork is suspected; it doubles each time the branch does not link.
+		probeDepth int64
+		// staged is a branch that is not (yet) heavier than ours, kept in
+		// memory while the following windows are fetched.
+		staged      map[int64][]byte
+		stagedStart int64
+		stagedTip   int64
+		recovering  bool
 	}
 
 	poolMu sync.Mutex
@@ -161,8 +170,17 @@ func NewWithConfig(root string, cfg Config) (*Node, error) {
 		n.CreateGenesis()
 	}
 	n.myLastBlock = n.Blocks.LastUpdated()
-	n.loadProposers()
-	n.noteTip(n.myLastBlock)
+	n.UpdateMyData()
+	if err := n.loadProposers(); err != nil {
+		return nil, err
+	}
+	n.chainMu.Lock()
+	err = n.recoverLocked()
+	n.chainMu.Unlock()
+	if err != nil && !errors.Is(err, ErrCorrupt) {
+		return nil, err
+	}
+	n.noteTip(n.MyLastBlock())
 	n.Wallet.ImportFromBackup(n.Lay.RPCBakDir)
 	n.UpdateMyData()
 	return n, nil

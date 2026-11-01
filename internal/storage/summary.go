@@ -429,7 +429,7 @@ func (s *SummaryDB) updateChangesLocked() error {
 				err = werr
 			}
 		}
-		if serr := f.Sync(); serr != nil && err == nil {
+		if serr := syncFile(f); serr != nil && err == nil {
 			err = serr
 		}
 	}

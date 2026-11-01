@@ -36,99 +36,139 @@ func (n *Node) setProbe(v bool) {
 }
 
 // BlocksRequestFrom is the "last block we have" number to put in a block
-// request: our tip normally, MaxReorgDepth earlier (never into the finalized
-// part) when a fork is suspected.
+// request: our tip normally. While a branch is staged it is the staged tip
+// (the next window continues it); while a fork is suspected it is the probe
+// depth before our tip, which doubles each time the answer does not link, so
+// a fork of any depth is found (FIX(re2 3b, 10)).
 func (n *Node) BlocksRequestFrom() int64 {
+	n.chainState.mu.Lock()
+	staged, tip, probe, depth := len(n.chainState.staged) > 0, n.chainState.stagedTip, n.chainState.probe, n.chainState.probeDepth
+	n.chainState.mu.Unlock()
+	if staged {
+		return tip
+	}
 	last := n.MyLastBlock()
-	if !n.ForkProbe() {
+	if !probe {
 		return last
 	}
-	from := last - MaxReorgDepth + 1
-	if f := n.Finalized(); from < f {
-		from = f
+	if depth < MaxReorgDepth {
+		depth = MaxReorgDepth
 	}
+	from := last - depth
 	if from < 0 {
 		from = 0
 	}
 	return from
 }
 
-type candidate struct {
+func (n *Node) deepenProbe() {
+	n.chainState.mu.Lock()
+	n.chainState.probe = true
+	if n.chainState.probeDepth < MaxReorgDepth {
+		n.chainState.probeDepth = MaxReorgDepth
+	} else {
+		n.chainState.probeDepth *= 2
+	}
+	n.chainState.mu.Unlock()
+}
+
+func (n *Node) clearStaged() {
+	n.chainState.mu.Lock()
+	n.chainState.staged, n.chainState.stagedStart, n.chainState.stagedTip = nil, 0, 0
+	n.chainState.mu.Unlock()
+}
+
+// maxStaged bounds the branch kept in memory while it is compared.
+const maxStaged = 20000
+
+type cand struct {
 	blk     *storage.Block
 	raw     []byte
+	hash    string
+	score   int64
 	sumHash string
 	moved   bool
+}
+
+// blockScoreAt is the score of our own block num.
+func (n *Node) blockScoreAt(num int64) int64 {
+	blk, err := n.Blocks.Read(num)
+	if err != nil || !blk.V2 {
+		return 0
+	}
+	props := n.Proposers()
+	return BlockScore(len(props), indexOfKey(props, blk.SealKey), SlotOf(blk.Header.TimeEnd), SlotOf(n.Blocks.Header(num-1).TimeEnd))
 }
 
 // acceptRunLocked is the one place where blocks from outside enter the chain
 // (FIX(C-03, M-10)). byNum holds raw block files by number. Blocks identical
 // to ours are skipped; the first differing block must continue one of our
-// blocks (at or above the finality horizon). The run is validated and applied
-// block by block against the state at its fork point. It is adopted when it
-// extends our tip, or when it is Preferred over our blocks above the fork
-// point; otherwise the state is put back untouched. It returns how many
-// blocks were stored.
+// blocks. The seals, links and scores of the run are checked first, before any
+// state is touched. A branch is adopted when it extends our tip or beats our
+// blocks above the fork (BlockScore, then Preferred); nothing else decides,
+// so every node that sees the same blocks ends on the same chain whatever
+// its own history (FIX(re2 3): no local finality in the decision). A branch
+// that does not beat ours yet is staged so the next windows can complete it.
 func (n *Node) acceptRunLocked(byNum map[int64][]byte) (int, error) {
 	if n.isCorrupt() {
 		return 0, ErrCorrupt
 	}
-	if len(n.Proposers()) == 0 {
+	props := n.Proposers()
+	if len(props) == 0 {
 		return 0, ErrNoProposers
 	}
+	k := len(props)
+	// A staged branch continues with the next window.
+	n.chainState.mu.Lock()
+	if len(n.chainState.staged) > 0 {
+		lo := int64(-1)
+		for x := range byNum {
+			if lo < 0 || x < lo {
+				lo = x
+			}
+		}
+		if lo == n.chainState.stagedTip+1 && len(n.chainState.staged)+len(byNum) <= maxStaged {
+			merged := make(map[int64][]byte, len(n.chainState.staged)+len(byNum))
+			for x, v := range n.chainState.staged {
+				merged[x] = v
+			}
+			for x, v := range byNum {
+				merged[x] = v
+			}
+			byNum = merged
+		}
+	}
+	n.chainState.mu.Unlock()
+
 	var nums []int64
-	for k := range byNum {
-		nums = append(nums, k)
+	for x := range byNum {
+		nums = append(nums, x)
 	}
 	sort.Slice(nums, func(i, j int) bool { return nums[i] < nums[j] })
 	last := n.MyLastBlock()
 	start := int64(-1)
-	for _, k := range nums {
-		if k <= last && crypto.IDHashBytes(byNum[k]) == crypto.IDHashFile(n.Lay.BlockFile(k)) {
+	for _, x := range nums {
+		if x <= last && crypto.IDHashBytes(byNum[x]) == crypto.IDHashFile(n.Lay.BlockFile(x)) {
 			continue // already ours
 		}
-		start = k
+		start = x
 		break
 	}
 	if start < 0 {
 		n.setProbe(false)
+		n.clearStaged()
 		return 0, nil
 	}
 	if start > last+1 || start < 1 {
 		return 0, nil // not contiguous with anything we hold
 	}
 	fork := start - 1 // last block we keep
-	if start <= last && fork < n.Finalized() {
-		return 0, bad("branch forks at %d, below the finality horizon %d", fork, n.Finalized())
-	}
 
-	defer n.dropEvalSnapshots()
-	// State of our tip, to come back to when the branch is not taken.
-	if err := n.snapshot("tip"); err != nil {
-		return 0, err
-	}
-	putBack := func() {
-		n.Summary.ResetBlockRecords()
-		_ = n.restoreSnapshot("tip")
-	}
-	if start <= last {
-		if !n.hasSnapshot(codec.IntToStr(start)) {
-			return 0, bad("no undo data for block %d", start)
-		}
-		if err := n.restoreSnapshot(codec.IntToStr(start)); err != nil {
-			putBack()
-			return 0, err
-		}
-	}
+	// ---- phase 1: seals, links, scores; no state is touched ----
 	prev := n.Blocks.Header(fork)
 	prevHash := crypto.IDHashFile(n.Lay.BlockFile(fork))
-	recent := map[string]bool{}
-	for _, o := range n.Blocks.Orders(fork) {
-		recent[o.TrfrID] = true
-	}
-	var cands []candidate
+	var pre []cand
 	var firstErr error
-	k := len(n.Proposers())
-	var weight int64
 	for num := start; ; num++ {
 		raw, ok := byNum[num]
 		if !ok {
@@ -141,87 +181,211 @@ func (n *Node) acceptRunLocked(byNum map[int64][]byte) (int, error) {
 		if err == nil && blk.Header.Number != num {
 			err = bad("file %d.blk holds block %d", num, blk.Header.Number)
 		}
-		var sum string
-		var moved bool
+		if err == nil && blk.Header.LastBlockHash != prevHash {
+			err = bad("parent hash %q != %q", blk.Header.LastBlockHash, prevHash)
+			if len(pre) == 0 {
+				err = errors.Join(ErrForkParent, err)
+			}
+		}
+		var idx int
 		if err == nil {
-			sum, moved, err = n.evalBlock(blk, prev, prevHash, recent, "c"+codec.IntToStr(num))
+			if !blk.V2 || len(blk.Keys) != len(blk.Orders) {
+				err = bad("block has no authentication trailer")
+			} else {
+				idx, err = n.checkSeal(blk)
+			}
 		}
 		if err != nil {
 			firstErr = err
-			if len(cands) == 0 && errors.Is(err, ErrInvalidBlock) && num == start && blk != nil &&
-				blk.Header.LastBlockHash != prevHash {
-				firstErr = errors.Join(ErrForkParent, err)
-				n.setProbe(true)
-			}
 			break
 		}
-		idx := indexOfKey(n.Proposers(), blk.SealKey)
-		weight += BlockWeight(k, idx, SlotOf(blk.Header.TimeEnd))
-		cands = append(cands, candidate{blk, raw, sum, moved})
-		prev, prevHash = blk.Header, crypto.IDHashBytes(raw)
+		pre = append(pre, cand{blk: blk, raw: raw, hash: crypto.IDHashBytes(raw),
+			score: BlockScore(k, idx, SlotOf(blk.Header.TimeEnd), SlotOf(prev.TimeEnd))})
+		prev, prevHash = blk.Header, pre[len(pre)-1].hash
+	}
+	if len(pre) == 0 {
+		n.clearStaged()
+		if errors.Is(firstErr, ErrForkParent) {
+			n.deepenProbe()
+		}
+		return 0, firstErr
+	}
+	n.chainState.mu.Lock()
+	n.chainState.probeDepth = 0
+	n.chainState.mu.Unlock()
+
+	var ours int64
+	var ourTime int64
+	var ourTip string
+	if start <= last {
+		for b := start; b <= last; b++ {
+			ours += n.blockScoreAt(b)
+		}
+		ourTime, ourTip = n.Blocks.Header(last).TimeEnd, n.tipHashAt(last)
+		var sum int64
+		best := false
+		for _, c := range pre {
+			sum += c.score
+			if Preferred(sum, c.blk.Header.TimeEnd, c.hash, ours, ourTime, ourTip) {
+				best = true
+				break
+			}
+		}
+		if !best {
+			// Not heavier (yet). Keep it if the run may continue.
+			if firstErr == nil && len(byNum) < maxStaged {
+				n.chainState.mu.Lock()
+				n.chainState.staged, n.chainState.stagedStart = byNum, start
+				n.chainState.stagedTip = pre[len(pre)-1].blk.Header.Number
+				n.chainState.mu.Unlock()
+			} else {
+				n.clearStaged()
+			}
+			n.setProbe(false)
+			return 0, firstErr
+		}
+	}
+
+	// ---- phase 2: apply to the state, then commit through the journal ----
+	defer n.dropEvalSnapshots()
+	if err := n.snapshot("tip"); err != nil {
+		return 0, err
+	}
+	if err := n.beginJournal("tip", last); err != nil {
+		return 0, err
+	}
+	putBack := func() {
+		n.Summary.ResetBlockRecords()
+		_ = n.restoreSnapshot("tip")
+		n.endJournal()
+	}
+	if start <= last {
+		var err error
+		if n.hasSnapshot(codec.IntToStr(start)) {
+			err = n.restoreSnapshot(codec.IntToStr(start))
+		} else {
+			// No undo data this far back: replay our own blocks up to the fork.
+			err = n.rebuildLocked(fork, nil)
+		}
+		if err != nil {
+			putBack()
+			return 0, err
+		}
+	}
+	prev = n.Blocks.Header(fork)
+	prevHash = crypto.IDHashFile(n.Lay.BlockFile(fork))
+	recent := map[string]bool{}
+	for _, o := range n.Blocks.Orders(fork) {
+		recent[o.TrfrID] = true
+	}
+	var cands []cand
+	for i := range pre {
+		c := pre[i]
+		sum, moved, err := n.evalBlock(c.blk, prev, prevHash, recent, "c"+codec.IntToStr(c.blk.Header.Number))
+		if err != nil {
+			firstErr = err
+			break
+		}
+		c.sumHash, c.moved = sum, moved
+		cands = append(cands, c)
+		prev, prevHash = c.blk.Header, c.hash
 		recent = map[string]bool{}
-		for _, o := range blk.Orders {
+		for _, o := range c.blk.Orders {
 			recent[o.TrfrID] = true
 		}
 	}
 	if len(cands) == 0 {
 		putBack()
+		n.clearStaged()
 		return 0, firstErr
 	}
 	if start <= last {
-		var ours int64
-		for b := start; b <= last; b++ {
-			ours += n.blockWeightAt(b)
+		var weight int64
+		for _, c := range cands {
+			weight += c.score
 		}
-		if !Preferred(weight, crypto.IDHashBytes(cands[len(cands)-1].raw), ours, n.tipHashAt(last)) {
+		tipc := cands[len(cands)-1]
+		if !Preferred(weight, tipc.blk.Header.TimeEnd, tipc.hash, ours, ourTime, ourTip) {
 			putBack()
 			n.setProbe(false)
+			n.clearStaged()
 			return 0, firstErr
 		}
 	}
-	// Adopt: drop our blocks above the fork, store the branch.
-	for b := last; b >= start; b-- {
-		n.Blocks.Delete(b)
+	blocks := map[int64][]byte{}
+	for _, c := range cands {
+		blocks[c.blk.Header.Number] = c.raw
 	}
-	// The headers file may already hold records for these blocks (it can be
-	// downloaded first): keep exactly one record per block up to the fork.
-	for n.Headers.Height() >= int(start) && n.Headers.RemoveLast() {
+	if err := n.commitJournal("c"+codec.IntToStr(start), last, start, blocks); err != nil {
+		putBack()
+		return 0, err
 	}
-	for i, c := range cands {
-		num := start + int64(i)
-		if err := n.Blocks.Write(c.blk); err != nil || !n.Headers.Add(num, crypto.IDHashBytes(c.raw), c.sumHash) {
-			for b := start + int64(i); b >= start; b-- {
-				n.Blocks.Delete(b)
-			}
-			// headers for the blocks written so far are dropped; ours above
-			// the fork are gone, so the node resynchronises from the fork.
-			for n.Headers.Height() >= int(start) && n.Headers.RemoveLast() {
-			}
-			putBack()
-			n.SetMyLastBlock(n.Blocks.LastUpdated())
-			n.UpdateMyData()
-			if err == nil {
-				err = errHeaderWrite
-			}
-			return 0, err
-		}
-		n.promoteSnapshot(num)
+	if err := n.writeCands(start, last, cands); err != nil {
+		// The journal is durable; replay it now, or leave it to the next start.
+		n.failedCommit()
+		return 0, err
+	}
+	n.endJournal()
+	for _, c := range cands {
+		n.promoteSnapshot(c.blk.Header.Number)
 	}
 	tip := start + int64(len(cands)) - 1
-	n.SetMyLastBlock(tip)
 	n.Summary.SetLastOp(tip)
-	n.UpdateMyData()
 	n.Summary.SetHash()
 	n.Headers.SetHash()
 	n.noteTip(tip)
 	n.pruneSnapshots(tip)
 	n.setProbe(false)
+	n.clearStaged()
+	// A new period begins: reports and lists of the old one are void.
+	n.ClearMNsChecks()
+	n.ClearMNsList()
+	n.ClearReceivedMNs()
 	if start <= last {
-		n.ClearMNsChecks()
-		n.ClearMNsList()
 		n.logf("console", "Adopted a heavier branch from block "+codec.IntToStr(start))
 	}
 	return len(cands), firstErr
+}
+
+// writeCands replaces our blocks above the fork with the candidates.
+func (n *Node) writeCands(start, last int64, cands []cand) error {
+	for b := last; b >= start; b-- {
+		n.Blocks.Delete(b)
+	}
+	if start <= last && n.DB != nil {
+		if err := n.DB.RollbackTo(int32(start - 1)); err != nil {
+			return err
+		}
+	}
+	for n.Headers.Height() >= int(start) && n.Headers.RemoveLast() {
+	}
+	for i, c := range cands {
+		num := start + int64(i)
+		if err := n.Blocks.Write(c.blk); err != nil {
+			return err
+		}
+		n.SetMyLastBlock(num)
+		if !n.Headers.Add(num, c.hash, c.sumHash) {
+			return errHeaderWrite
+		}
+	}
+	n.UpdateMyData()
+	return nil
+}
+
+// failedCommit handles a write failure after the commit point: recover from
+// the journal once; if that fails too the node stops until it is restarted.
+func (n *Node) failedCommit() {
+	if n.chainState.recovering {
+		n.markCorrupt()
+		return
+	}
+	n.chainState.recovering = true
+	err := n.recoverLocked()
+	n.chainState.recovering = false
+	if err != nil {
+		n.markCorrupt()
+	}
 }
 
 // promoteSnapshot turns the evaluation snapshot of a block into its undo
@@ -229,14 +393,6 @@ func (n *Node) acceptRunLocked(byNum map[int64][]byte) (int, error) {
 func (n *Node) promoteSnapshot(num int64) {
 	_ = removeAll(n.undoDir(codec.IntToStr(num)))
 	_ = renameDir(n.undoDir("c"+codec.IntToStr(num)), n.undoDir(codec.IntToStr(num)))
-}
-
-func (n *Node) blockWeightAt(num int64) int64 {
-	blk, err := n.Blocks.Read(num)
-	if err != nil || !blk.V2 {
-		return 0
-	}
-	return BlockWeight(len(n.Proposers()), indexOfKey(n.Proposers(), blk.SealKey), SlotOf(blk.Header.TimeEnd))
 }
 
 // dropEvalSnapshots removes the scratch snapshots of a branch evaluation.
@@ -272,7 +428,19 @@ func (n *Node) evalBlock(blk *storage.Block, prev types.BlockHeader, prevHash st
 		return "", false, bad("%v", err)
 	}
 	n.Summary.SetLastOp(blk.Header.Number)
-	n.persistDerived(blk.Header.Number, moved)
+	if err = n.persistDerived(blk.Header.Number, moved); err == nil {
+		// FIX(re2 1): the block names the state it produces; a node that is
+		// not on that state refuses the block.
+		root, _, _ := parseSolution(blk.Header.Solution)
+		if root != n.stateRoot() {
+			err = bad("state root of block %d differs from the state it produces ", blk.Header.Number)
+		}
+	}
+	if err != nil {
+		n.Summary.ResetBlockRecords()
+		_ = n.restoreSnapshot(label)
+		return "", false, err
+	}
 	return n.Summary.Hash(), moved, nil
 }
 

@@ -248,14 +248,23 @@ func Shares(number, reward, fees int64, masternodes int) (dev, mnsPay, mnsTotal,
 			return
 		}
 	}
-	if number >= MNBlockStart && masternodes > 0 {
-		pool, okPool := ApplyBP(gross, GetMNsPercentage(number, ""))
+	// FIX(re2 M-4): the masternode pool is reserved whatever list the proposer
+	// publishes. Nodes that are not listed (or not there) do not enlarge the
+	// proposer's remainder: the unpaid part is burnt. Only the proposer knows
+	// the list, so the one rule that removes the incentive to shorten it is
+	// that its length does not change what the proposer earns.
+	var pool int64
+	if number >= MNBlockStart {
+		var okPool bool
+		pool, okPool = ApplyBP(gross, GetMNsPercentage(number, ""))
 		if !okPool {
 			return 0, 0, 0, 0, false
 		}
-		mnsPay = pool / int64(masternodes)
-		mnsTotal = mnsPay * int64(masternodes)
+		if masternodes > 0 {
+			mnsPay = pool / int64(masternodes)
+			mnsTotal = mnsPay * int64(masternodes)
+		}
 	}
-	pow = gross - dev - mnsTotal
+	pow = gross - dev - pool
 	return dev, mnsPay, mnsTotal, pow, pow >= 0
 }

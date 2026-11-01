@@ -38,23 +38,26 @@ func (n *Node) Proposers() []string {
 }
 
 // SetProposers stores the proposer list (one public key per line, in rank
-// order) in the data directory. The list is chain configuration: every node
-// of a chain must hold the same list in the same order.
+// order) in the data directory. FIX(re2 7): the list is fixed for the life of
+// a chain. Every block commits to its digest (Solution), so a node whose file
+// differs refuses block 1 and says why, and once the chain has a block the
+// list can no longer be replaced by anything with another digest. A rotation
+// is a new chain (docs/consensus.md).
 func (n *Node) SetProposers(keys []string) error {
-	var clean []string
-	seen := map[string]bool{}
-	for _, k := range keys {
-		k = strings.TrimSpace(k)
-		if k == "" || seen[k] {
-			continue
-		}
-		if crypto.GetAddressFromPublicKey(k, 0) == "" || len(k) > 120 {
-			return errors.New("not a public key: " + k)
-		}
-		seen[k] = true
-		clean = append(clean, k)
+	clean, err := cleanProposers(keys)
+	if err != nil {
+		return err
 	}
-	if err := os.WriteFile(filepath.Join(n.Lay.Root, proposersFile), []byte(strings.Join(clean, "\n")+"\n"), 0o600); err != nil {
+	if len(clean) == 0 {
+		return errors.New("empty proposer list")
+	}
+	if cur := n.Proposers(); len(cur) > 0 && n.MyLastBlock() >= 1 && proposersDigest(cur) != proposersDigest(clean) {
+		return errors.New("the proposer list is fixed once the chain has blocks")
+	}
+	if d, ok := n.committedDigest(); ok && d != proposersDigest(clean) {
+		return errors.New("proposer list does not match the one the chain commits to")
+	}
+	if err := storage.WriteFileAtomic(filepath.Join(n.Lay.Root, proposersFile), []byte(strings.Join(clean, "\n")+"\n")); err != nil {
 		return err
 	}
 	n.chainState.mu.Lock()
@@ -63,18 +66,78 @@ func (n *Node) SetProposers(keys []string) error {
 	return nil
 }
 
-func (n *Node) loadProposers() {
-	raw, err := os.ReadFile(filepath.Join(n.Lay.Root, proposersFile))
-	if err != nil {
-		return
-	}
-	var keys []string
-	for _, l := range strings.Split(string(raw), "\n") {
-		if l = strings.TrimSpace(l); l != "" {
-			keys = append(keys, l)
+// cleanProposers validates a list: every entry a public key, no duplicates.
+func cleanProposers(keys []string) ([]string, error) {
+	var clean []string
+	seen := map[string]bool{}
+	for _, k := range keys {
+		k = strings.TrimSpace(k)
+		if k == "" {
+			continue
 		}
+		if seen[k] {
+			return nil, errors.New("duplicate proposer key: " + k)
+		}
+		if crypto.GetAddressFromPublicKey(k, 0) == "" || len(k) > 120 {
+			return nil, errors.New("not a public key: " + k)
+		}
+		if _, ok := crypto.DecodeBase64Strict(k); !ok {
+			return nil, errors.New("proposer key is not canonical Base64: " + k)
+		}
+		seen[k] = true
+		clean = append(clean, k)
 	}
+	return clean, nil
+}
+
+// proposersDigest is what every block commits to.
+func proposersDigest(keys []string) string {
+	return crypto.SHA256String("PROPOSERS1\n" + strings.Join(keys, "\n"))
+}
+
+// committedDigest is the proposer digest the chain commits to (block 1).
+func (n *Node) committedDigest() (string, bool) {
+	if n.MyLastBlock() < 1 {
+		return "", false
+	}
+	blk, err := n.Blocks.Read(1)
+	if err != nil || !blk.V2 {
+		return "", false
+	}
+	_, d, ok := parseSolution(blk.Header.Solution)
+	return d, ok
+}
+
+// loadProposers reads proposers.txt. A missing file is allowed only for a
+// chain that has no block yet (a node still to be configured: it neither
+// builds nor accepts anything). A file that cannot be read, is empty, has a
+// bad or repeated key, or does not match what the chain commits to is a hard
+// error: the node must not guess its way into another chain.
+func (n *Node) loadProposers() error {
+	raw, err := os.ReadFile(filepath.Join(n.Lay.Root, proposersFile))
+	if errors.Is(err, os.ErrNotExist) {
+		if n.MyLastBlock() >= 1 {
+			return errors.New("proposers.txt is missing but the chain has blocks")
+		}
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	keys, err := cleanProposers(strings.Split(string(raw), "\n"))
+	if err != nil {
+		return err
+	}
+	if len(keys) == 0 {
+		return errors.New("proposers.txt is empty")
+	}
+	if d, ok := n.committedDigest(); ok && d != proposersDigest(keys) {
+		return errors.New("proposers.txt does not match the list the chain commits to")
+	}
+	n.chainState.mu.Lock()
 	n.chainState.proposers = keys
+	n.chainState.mu.Unlock()
+	return nil
 }
 
 func indexOfKey(keys []string, k string) int {
@@ -144,26 +207,45 @@ func BlockWeight(k, proposerIdx int, slot int64) int64 {
 // SlotOf is the turn number of a block time.
 func SlotOf(timeEnd int64) int64 { return timeEnd / consensus.SecondsPerBlock }
 
-// Preferred reports whether chain A beats chain B: the heavier one wins, and
-// equal weight is settled by the lower tip hash. Both inputs are facts about
-// valid blocks, not votes. A proposer can grind its own tip hash, but only
-// among blocks it is itself allowed to sign at that weight, so grinding can
-// only pick between equally weighted blocks of the authorised set.
-func Preferred(weightA int64, tipA string, weightB int64, tipB string) bool {
-	if weightA != weightB {
-		return weightA > weightB
+// BlockScore is what a block adds to its branch: its weight minus k for every
+// slot skipped since its parent. FIX(re2 5): a skipped slot costs a full
+// in-turn block, so a proposer that sits on the parent and builds later does
+// not tie with the block it replaces.
+func BlockScore(k, proposerIdx int, slot, parentSlot int64) int64 {
+	w := BlockWeight(k, proposerIdx, slot)
+	if w == 0 {
+		return 0
+	}
+	if gap := slot - parentSlot - 1; gap > 0 {
+		w -= int64(k) * gap
+	}
+	return w
+}
+
+// Preferred reports whether branch A beats branch B (both measured from the
+// same fork point): the higher score wins, then the earlier tip time (the
+// proposer that was first in the schedule keeps its block), then the lower tip
+// hash. All three are facts of valid blocks, not votes, and nothing here
+// depends on the node's own history, so every node picks the same branch.
+// With the header pinned (validate.go) the only freedom of a proposer is its
+// choice of orders, so grinding the hash is limited to equivocation.
+func Preferred(scoreA, timeA int64, tipA string, scoreB, timeB int64, tipB string) bool {
+	if scoreA != scoreB {
+		return scoreA > scoreB
+	}
+	if timeA != timeB {
+		return timeA < timeB
 	}
 	return tipA < tipB
 }
 
 // InTurn reports whether this node may build the block whose time is
-// timestamp: it holds a proposer key and the slot is its turn. A node with no
-// proposer list at all builds unsealed blocks (a standalone chain nobody can
-// join, since peers refuse unauthenticated blocks).
+// timestamp: it holds a proposer key and the slot is its turn. Without a
+// proposer list nothing is built.
 func (n *Node) InTurn(timestamp int64) bool {
 	props := n.Proposers()
 	if len(props) == 0 {
-		return true
+		return false
 	}
 	idx, _, ok := n.sealer()
 	return ok && int(SlotOf(timestamp)%int64(len(props))) == idx
@@ -173,7 +255,8 @@ func (n *Node) InTurn(timestamp int64) bool {
 
 func (n *Node) undoDir(label string) string { return filepath.Join(n.Lay.Root, "UNDO", label) }
 
-// snapshot copies the three consensus state files into UNDO/<label>.
+// snapshot copies the three consensus state files into UNDO/<label>. The copy
+// is on stable storage when it returns: recovery after a crash depends on it.
 func (n *Node) snapshot(label string) error {
 	dir := n.undoDir(label)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -184,6 +267,8 @@ func (n *Node) snapshot(label string) error {
 			return err
 		}
 	}
+	syncDir(dir)
+	syncDir(filepath.Dir(dir))
 	return nil
 }
 
@@ -209,6 +294,8 @@ func (n *Node) stateFiles() map[string]string {
 	return map[string]string{"sumary.psk": n.Lay.Summary, "gvts.psk": n.Lay.GVTs, "psos.dat": n.Lay.PSOs}
 }
 
+// copyFileOrEmpty copies src to dst atomically and durably; a missing source
+// is an empty file.
 func copyFileOrEmpty(src, dst string) error {
 	b, err := os.ReadFile(src)
 	if errors.Is(err, os.ErrNotExist) {
@@ -217,11 +304,7 @@ func copyFileOrEmpty(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	tmp := dst + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, dst)
+	return storage.WriteFileAtomic(dst, b)
 }
 
 // undoKeep is how many per-block snapshots are kept: more than MaxReorgDepth.

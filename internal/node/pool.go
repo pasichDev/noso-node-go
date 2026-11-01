@@ -304,6 +304,12 @@ func (n *Node) PTCOrder(line string) string {
 			proceder = false
 			setCode(96)
 		}
+		// FIX(re2 H-2): one wire order pays one receiver, and a reference is
+		// plain text (it is re-split by the RPC and the block listings).
+		if ok && (!types.ValidReference(o.Reference) || (len(trx) > 1 && o.Receiver != trx[0].Receiver)) {
+			proceder = false
+			setCode(102)
+		}
 		totalSent += o.AmmountTrf
 		totalFee += o.AmmountFee
 		genOrderID += o.TrfrID

@@ -73,7 +73,7 @@ func (h *Headers) Add(block int64, blockHash, sumHash string) bool {
 	if _, err = f.WriteAt(types.Resumen{Block: int32(block), BlockHash: blockHash, SumHash: sumHash}.Encode(), off); err != nil {
 		return false
 	}
-	return f.Sync() == nil // durable before the caller moves on (re2 #7)
+	return syncFile(f) == nil // durable before the caller moves on (re2 #7)
 }
 
 // RemoveLast drops the final record (RemoveHeadersLastRecord).
@@ -96,7 +96,7 @@ func (h *Headers) RemoveLast() bool {
 		return false
 	}
 	defer f.Close()
-	return f.Sync() == nil
+	return syncFile(f) == nil
 }
 
 // Height mirrors GetHeadersHeigth: record count minus one, -1 on error.

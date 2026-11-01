@@ -105,7 +105,8 @@ func TestRW_NoDowngradeNoStranger(t *testing.T) {
 	}
 	// a node with no proposer list accepts nothing (fails closed)
 	now := int64(consensus.GenesysTimeStamp) + 100000
-	lone := newTestNode(t, &now)
+	lone, _ := New(t.TempDir()+"/NOSODATA", nil)
+	lone.SetClock(func() int64 { return now })
 	if _, err := lone.AcceptBlocks(map[int64][]byte{1: r.Block.Encode()}); !errors.Is(err, ErrNoProposers) {
 		t.Fatalf("unconfigured node: %v", err)
 	}
@@ -225,6 +226,7 @@ func TestRW_MNShareChecked(t *testing.T) {
 	try := func(name string, addrs []string, pay int64) {
 		blk := forge(t, a, ts, nil, nil)
 		blk.MNsAddrs, blk.MNsPay = addrs, pay
+		restamp(a, blk)
 		sealBlock(blk, a.Wallet.At(0).PublicKey, a.Wallet.At(0).PrivateKey)
 		if _, err := offer(f, blk); err == nil {
 			t.Fatalf("%s accepted", name)
@@ -242,6 +244,7 @@ func TestRW_MNShareChecked(t *testing.T) {
 	_ = dev
 	good := forge(t, a, ts, nil, nil)
 	good.MNsAddrs, good.MNsPay = []string{holder.Hash}, share
+	restamp(a, good)
 	sealBlock(good, a.Wallet.At(0).PublicKey, a.Wallet.At(0).PrivateKey)
 	if n, err := offer(f, good); err != nil || n != 1 {
 		t.Fatalf("derived share refused: %v", err)
@@ -281,10 +284,7 @@ func TestRW_BuilderNeverExceedsValidator(t *testing.T) {
 			pool = append(pool, o)
 		}
 		for i := 0; i < 2100; i++ {
-			o, k := signedOrder(t, w, "TRFR", dest.Hash, "null", 10, 1000000, ts0-99+int64(i%90))
-			o.Sender = k
-			o.TrxLine = int32(i + 1)
-			SignOrder(&o, w.PrivateKey)
+			o, k := signedOrder(t, w, "TRFR", dest.Hash, "r"+strconv.Itoa(i), 10, 1000000, ts0-99+int64(i%90))
 			o.Sender = k
 			pool = append(pool, o)
 		}
@@ -482,7 +482,7 @@ func TestRW_ForkChoiceConverges(t *testing.T) {
 	_, _ = obsB.StageBlocks(z1)
 	sameState(t, obsA, obsB)
 	wantTip := hash2
-	if Preferred(branchWeight(q1, 2, 3), hash1, branchWeight(q2, 2, 2), hash2) {
+	if Preferred(branchWeight(q1, 2, 3), q1.LastBlockData().TimeEnd, hash1, branchWeight(q2, 2, 2), q2.LastBlockData().TimeEnd, hash2) {
 		wantTip = hash1
 	}
 	if obsA.MyLastBlockHash() != wantTip {
@@ -509,10 +509,10 @@ func TestRW_WeightAndPreference(t *testing.T) {
 	if BlockWeight(3, 1, 4) != 3 || BlockWeight(3, 2, 4) != 2 || BlockWeight(3, 0, 4) != 1 || BlockWeight(1, 0, 9) != 1 {
 		t.Fatal("block weight")
 	}
-	if !Preferred(5, "b", 4, "a") || Preferred(4, "a", 5, "b") {
+	if !Preferred(5, 1, "b", 4, 1, "a") || Preferred(4, 1, "a", 5, 1, "b") {
 		t.Fatal("heavier wins")
 	}
-	if !Preferred(5, "a", 5, "b") || Preferred(5, "b", 5, "a") || Preferred(5, "a", 5, "a") {
+	if !Preferred(5, 1, "a", 5, 1, "b") || Preferred(5, 1, "b", 5, 1, "a") || Preferred(5, 1, "a", 5, 1, "a") {
 		t.Fatal("tie goes to the lower hash")
 	}
 }
@@ -614,7 +614,7 @@ var _ = strings.Contains
 func branchWeight(n *Node, from, to int64) int64 {
 	var w int64
 	for i := from; i <= to; i++ {
-		w += n.blockWeightAt(i)
+		w += n.blockScoreAt(i)
 	}
 	return w
 }

@@ -58,7 +58,7 @@ func TestC04_TrfrIDBoundAndReplay(t *testing.T) {
 		t.Fatal("H-07: changed type accepted")
 	}
 	// Mine it, then replay the identical signed order in the next period.
-	o.OrderID = "ORx"
+	o.OrderID = SingleOrderID(o.TrfrID)
 	n.AddPool(o)
 	*now += 600 - 90 + 90
 	if _, err := n.BuildNewBlock(2, (*now/600)*600, n.MyLastBlockHash(), w.Hash, "x"); err != nil {
