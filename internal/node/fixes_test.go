@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/pasichDev/noso-node-go/internal/codec"
@@ -682,9 +683,10 @@ func TestFinal_ProbeResumeIsClearedByAWindowThatDoesNotLink(t *testing.T) {
 	}
 }
 
-// final-consensus 12, second line of defence: a tip that was sealed again by the
-// proposer (new random nonce, same content and state root) is a valid block but
-// not the one the headers file recorded; the start must not call that healthy.
+// final-consensus 12, second line of defence: a tip file that differs from the
+// one the headers file recorded (here only in its seal text; signatures are
+// deterministic now, F-9, so a second valid seal of the same block no longer
+// exists) must not be called healthy at start.
 func TestFinal_ResealedTipIsRepairedAtStart(t *testing.T) {
 	b := newBed(t, 1)
 	a := b.nodes[0]
@@ -694,9 +696,12 @@ func TestFinal_ResealedTipIsRepairedAtStart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := a.Wallet.At(0)
 	old := readF(a.Lay.BlockFile(2))
-	sealBlock(blk, w.PublicKey, w.PrivateKey)
+	tail := "AA"
+	if strings.HasSuffix(blk.SealSig, tail) {
+		tail = "BB"
+	}
+	blk.SealSig = blk.SealSig[:len(blk.SealSig)-2] + tail
 	if bytes.Equal(blk.Encode(), old) {
 		t.Fatal("the seal did not change")
 	}

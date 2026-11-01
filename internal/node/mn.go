@@ -627,12 +627,41 @@ func (n *Node) IsAllSynced() int {
 func (n *Node) VerificationLine(nonce string) string {
 	o := n.Options()
 	w := n.Wallet.At(n.Wallet.IndexOf(o.MNSign))
-	if len(nonce) < 8 || len(nonce) > 64 || w.PrivateKey == "" || n.IsAllSynced() != 0 {
+	// FIX(F-9): this answer is signed for anyone who connects, before any
+	// handshake. What a peer can make the key sign is therefore tight: a nonce
+	// of the exact form the challenger makes (16 to 64 lowercase hex digits),
+	// and never with a proposer key, whose compromise would cost the whole
+	// chain. The caller limits the rate per address.
+	if !validMNVERNonce(nonce) || w.PrivateKey == "" || n.isProposerKey(w.PublicKey) || n.IsAllSynced() != 0 {
 		return "False"
 	}
 	st := n.SyncTus()
 	sig := crypto.SignCanonical(w.PrivateKey, "MNVER1", nonce, st, o.MNFunds)
 	return "True " + st + " " + o.MNFunds + " " + o.MNSign + " " + w.PublicKey + " " + sig
+}
+
+// validMNVERNonce is the form of the nonce a challenger sends (randomNonce).
+func validMNVERNonce(s string) bool {
+	if len(s) < 16 || len(s) > 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// isProposerKey reports whether pub is on the proposer list.
+func (n *Node) isProposerKey(pub string) bool { return indexOfKey(n.Proposers(), pub) >= 0 }
+
+// MNSignIsProposerKey reports that the configured masternode sign key is a
+// proposer key: such a key never answers challenges (VerificationLine), so a
+// masternode that uses it cannot be listed. Use another address of the wallet.
+func (n *Node) MNSignIsProposerKey() bool {
+	w := n.Wallet.At(n.Wallet.IndexOf(n.Options().MNSign))
+	return w.PublicKey != "" && n.isProposerKey(w.PublicKey)
 }
 
 // CheckVerificationLine validates an MNVER answer for the masternode m.

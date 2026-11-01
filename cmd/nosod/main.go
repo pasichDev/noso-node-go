@@ -145,6 +145,9 @@ func run(opt options, sig <-chan os.Signal) (restart bool) {
 	for _, w := range n.Wallet.Warnings() {
 		logf("console", w)
 	}
+	if n.MNSignIsProposerKey() {
+		logf("console", "MNSign is a proposer key: it never answers masternode challenges (a proposer key must not sign for peers). Use another address of the wallet as the sign address.")
+	}
 	r := rpc.New(e)
 	r.Log = logf
 	d := cli.New(n, e, r)

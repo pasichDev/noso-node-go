@@ -241,6 +241,21 @@ func initNetwork(args []string, stdout, stderr *os.File) int {
 		keys = append(keys, ns[i].Wallet.At(0).PublicKey)
 	}
 	anchor := time.Now().Unix()
+	// FIX(F-9): the key that signs masternode challenges answers any peer, so
+	// a proposer node gets a second address for it; the proposer key never
+	// does that.
+	signAddr := make([]string, len(ns))
+	for i, n := range ns {
+		signAddr[i] = n.Wallet.At(0).Hash
+		if i < *props {
+			w, err := n.Wallet.NewAddress()
+			if err != nil {
+				fmt.Fprintln(stderr, "init-network:", err)
+				return 1
+			}
+			signAddr[i] = w.Hash
+		}
+	}
 	for i, n := range ns {
 		// FIX: the same list on every node, the node itself included. The
 		// status hash the nodes vote on contains a hash of the configuration,
@@ -261,7 +276,7 @@ func initNetwork(args []string, stdout, stderr *os.File) int {
 			o.BuildBlocks = i < *props
 			o.MNIP = *host
 			o.MNPort = strconv.Itoa(peerPorts[i])
-			o.MNSign = n.Wallet.At(0).Hash
+			o.MNSign = signAddr[i]
 			if len(rpcPorts) > 0 {
 				o.RPCAuto = true
 				o.RPCPort = rpcPorts[i]

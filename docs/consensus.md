@@ -107,8 +107,9 @@ finality in the decision**. Consequences:
 * A proposer cannot orphan the block before it by building on the same parent
   in the next slot: the skipped slot costs a block, and at equal score the
   earlier tip wins. The header is pinned (below), so the only freedom left to
-  grind a hash is the choice of orders (and the random nonce of the signature)
-  in a block for a slot the proposer owns, which is equivocation. Equivocation
+  grind a hash is the choice of orders in a block for a slot the proposer owns,
+  which is equivocation (signatures are deterministic, RFC 6979, so re-sealing the
+  same block gives the same bytes). Equivocation
   evidence is not recorded (not implemented).
 * **A proposer can rewrite history of any depth** (see the trust model): a
   heavier branch from any old block is adopted, however many blocks follow it.

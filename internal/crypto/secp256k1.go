@@ -2,14 +2,17 @@ package crypto
 
 import (
 	"bytes"
-	"crypto/rand"
 	"encoding/asn1"
 	"math/big"
+
+	secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
+	dcrecdsa "github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
 )
 
-// Minimal secp256k1 implementation (affine arithmetic over math/big).
-// Signing and verification only; this is a node wallet, not a hardened
-// signing service, and no secret-dependent branching is attempted.
+// Verification and point decoding use a small affine implementation over
+// math/big: they handle public data only. Everything that touches a private
+// scalar (signing, key generation) is done by dcrd's secp256k1, whose scalar
+// multiplication is constant time.
 
 var (
 	secpP, _  = new(big.Int).SetString("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F", 16)
@@ -142,40 +145,31 @@ var secpHalfN = new(big.Int).Rsh(secpN, 1)
 // the DER encoding. FIX(M-13): the S value is normalised to the low half of
 // the group order, so a signature cannot be re-encoded into a second valid
 // one (nosocrypto.pas:217-228 used SHA-1 and accepted either S).
+//
+// FIX(F-9): signing is done by dcrd's secp256k1 package, which multiplies in
+// constant time and derives the nonce by RFC 6979 from the key and the digest.
+// The home-made ladder above branched on the bits of a random nonce (its time
+// follows the nonce, the classic input of a lattice attack on a signing
+// oracle). The bytes are the same kind as before: DER, low S, so the verifier
+// below accepts them unchanged. The signature of one message is now the same
+// every time.
 func ecdsaSignDigest(h []byte, d *big.Int) ([]byte, bool) {
-	if d.Sign() <= 0 || d.Cmp(secpN) >= 0 {
+	if d.Sign() <= 0 || d.Cmp(secpN) >= 0 || len(h) != 32 {
 		return nil, false
 	}
-	e := new(big.Int).SetBytes(h)
-	for {
-		k, err := rand.Int(rand.Reader, secpN)
-		if err != nil {
-			return nil, false
-		}
-		if k.Sign() == 0 {
-			continue
-		}
-		pt := scalarMult(basePoint(), k)
-		r := new(big.Int).Mod(pt.x, secpN)
-		if r.Sign() == 0 {
-			continue
-		}
-		s := new(big.Int).Mul(r, d)
-		s.Add(s, e)
-		s.Mul(s, modInv(k, secpN))
-		s.Mod(s, secpN)
-		if s.Sign() == 0 {
-			continue
-		}
-		if s.Cmp(secpHalfN) > 0 {
-			s.Sub(secpN, s)
-		}
-		der, err := asn1.Marshal(ecdsaSig{r, s})
-		if err != nil {
-			return nil, false
-		}
-		return der, true
+	var raw [32]byte
+	d.FillBytes(raw[:])
+	var k secp.ModNScalar
+	overflow := k.SetByteSlice(raw[:])
+	for i := range raw {
+		raw[i] = 0
 	}
+	if overflow || k.IsZero() {
+		return nil, false
+	}
+	priv := secp.NewPrivateKey(&k)
+	defer priv.Zero()
+	return dcrecdsa.Sign(priv, h).Serialize(), true
 }
 
 // ecdsaVerifyDigest verifies a DER signature over a 32 byte digest and

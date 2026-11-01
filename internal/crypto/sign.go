@@ -1,9 +1,10 @@
 package crypto
 
 import (
-	"crypto/rand"
+	"math/big"
 	"strings"
 
+	secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/pasichDev/noso-node-go/internal/codec"
 )
 
@@ -16,19 +17,16 @@ type KeyPair struct {
 
 // GenerateKeyPair mirrors TSignerUtils.GenerateECKeyPair.
 func GenerateKeyPair() KeyPair {
-	for {
-		d, err := rand.Int(rand.Reader, secpN)
-		if err != nil {
-			panic(err)
-		}
-		if d.Sign() == 0 {
-			continue
-		}
-		pt := scalarMult(basePoint(), d)
-		return KeyPair{
-			PublicKey:  EncodeBase64(encodePoint(pt)),
-			PrivateKey: EncodeBase64(d.Bytes()),
-		}
+	priv, err := secp.GeneratePrivateKey()
+	if err != nil {
+		panic(err)
+	}
+	defer priv.Zero()
+	raw := priv.Key.Bytes()
+	d := new(big.Int).SetBytes(raw[:])
+	return KeyPair{
+		PublicKey:  EncodeBase64(priv.PubKey().SerializeUncompressed()),
+		PrivateKey: EncodeBase64(d.Bytes()),
 	}
 }
 

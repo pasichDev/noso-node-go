@@ -171,7 +171,7 @@ func (e *Engine) handleIncoming(c *Conn) {
 		return
 	}
 	switch codec.Parameter(line, 0) {
-	case "NSLGVT", "GETZIPSUMARY", "NSLBLKORD", "NSLMNS", "NSLPENDFULL", "NODESTATUS":
+	case "NSLGVT", "GETZIPSUMARY", "NSLBLKORD", "NSLMNS", "NSLPENDFULL", "NODESTATUS", "MNVER":
 		if !e.heavyOK(ip) { // FIX(M-08): costly requests are limited per peer
 			closeWith(c, "")
 			return

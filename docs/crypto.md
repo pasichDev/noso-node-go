@@ -73,7 +73,7 @@ orders of input fail with "Wrong addresses count".
 * Signatures: `SignCanonical` / `VerifyCanonical` hash a length-prefixed
   message (`"NOSO-SIG-v1"`, chain id, domain, fields; orders use the chain id of
   their network file, everything else the default one) with SHA-256 and sign it
-  with ECDSA on secp256k1. S is normalised to the low half and high-S
+  with ECDSA on secp256k1. Signing is done by `github.com/decred/dcrd/dcrec/secp256k1/v4`: constant-time scalar multiplication and RFC 6979 nonces, so one message gives one signature and the time of a signature does not depend on a secret nonce (F-9); the output is DER with low S, as before, and verification is unchanged. S is normalised to the low half and high-S
   signatures are rejected. The lenient Base64 decoding of messages, the SHA-1
   digest and the plain concatenated signed text of the original no longer
   exist (findings H-07, H-08, M-13).

@@ -22,10 +22,14 @@ func TestMasternodeIsListedOnEveryNode(t *testing.T) {
 	d := newDevnetWith(t, 4, 3, 100, &cfg)
 	defer d.stopAll()
 	w := d.nodes[0].Wallet.At(0)
+	signer, err := d.nodes[0].Wallet.NewAddress() // not the proposer key
+	if err != nil {
+		t.Fatal(err)
+	}
 	d.nodes[0].UpdateOptions(func(o *node.StorageOptions) {
 		o.MNIP = "127.0.0.1"
 		o.MNFunds = w.Hash
-		o.MNSign = w.Hash
+		o.MNSign = signer.Hash
 	})
 	d.start(0, 1, 2, 3)
 	deadline := time.Now().Add(150 * time.Second)
