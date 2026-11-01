@@ -175,6 +175,7 @@ func (a *App) startNode(pass []byte, plain bool, step func(string)) error {
 	n.Log = logf
 	e := network.NewEngine(n)
 	e.Log = logf
+	e.BindAddr = network.ReadBind(a.dataDir) // same rule as nosod: bind.txt is obeyed
 	a.n, a.e = n, e
 	a.r = rpc.New(e)
 	a.r.Log = logf

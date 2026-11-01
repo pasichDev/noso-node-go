@@ -221,3 +221,24 @@ func TestNoGUIOptionStopsTheRefresh(t *testing.T) {
 		t.Fatal("the refresh did not resume")
 	}
 }
+
+// A network made by init-network stays where its bind.txt says, also when the
+// desktop app runs the node.
+func TestStartNodeHonoursBindFile(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "NOSODATA")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "bind.txt"), []byte("127.0.0.1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := newApp(test.NewApp(), dir)
+	a.headless = true
+	if err := a.startNode([]byte("test passphrase"), false, func(string) {}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(a.shutdown)
+	if a.e.BindAddr != "127.0.0.1" {
+		t.Fatalf("BindAddr = %q", a.e.BindAddr)
+	}
+}

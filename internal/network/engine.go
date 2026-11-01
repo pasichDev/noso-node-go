@@ -2,8 +2,11 @@ package network
 
 import (
 	"net"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -124,6 +127,19 @@ type Engine struct {
 
 	stop chan struct{}
 	wg   sync.WaitGroup
+}
+
+// BindFile holds the address the peer listener of a data directory binds to.
+// init-network writes it; nosod and nosogui both read it.
+const BindFile = "bind.txt"
+
+// ReadBind returns the bind address stored in a data directory, "" if none.
+func ReadBind(dataDir string) string {
+	raw, err := os.ReadFile(filepath.Join(dataDir, BindFile))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(raw))
 }
 
 // NewEngine builds an engine around a node and wires the node hooks.

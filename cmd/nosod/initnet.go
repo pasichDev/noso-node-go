@@ -13,6 +13,7 @@ import (
 
 	"github.com/pasichDev/noso-node-go/internal/cli"
 	"github.com/pasichDev/noso-node-go/internal/codec"
+	"github.com/pasichDev/noso-node-go/internal/network"
 	"github.com/pasichDev/noso-node-go/internal/node"
 	"github.com/pasichDev/noso-node-go/internal/storage"
 )
@@ -25,16 +26,10 @@ const devnetFile = "devnet.txt"
 // `nosod init-network` writes it (the -host/-bind value, loopback by default);
 // `nosod -bind` overrides it; without either the node listens on every
 // interface, as a public node must.
-const bindFile = "bind.txt"
+const bindFile = network.BindFile
 
 // readBind returns the bind address stored in a data directory, "" if none.
-func readBind(dataDir string) string {
-	raw, err := os.ReadFile(filepath.Join(dataDir, bindFile))
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(raw))
-}
+func readBind(dataDir string) string { return network.ReadBind(dataDir) }
 
 // planPorts returns the peer and RPC port of every node. A rpcBase of 0 puts
 // the RPC ports right after the peer ports (base..base+n-1, then base+n..); a
