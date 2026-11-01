@@ -255,7 +255,7 @@ func (e *Engine) mnLoop() {
 		}
 		if o.MNAutoIP && n.BlockAge() > 10 && lastIPVerify < now {
 			lastIPVerify = consensus.NextBlockTimeStamp(now)
-			if my := e.GetMyIP(); my != "" && my != o.MNIP && my != "Closing NODE" && my != "BANNED" && codec.IsValidIP(my) {
+			if my := e.GetMyIP(); my != "" && my != o.MNIP && my != "Closing NODE" && my != "BANNED" && n.ValidMNIP(my) {
 				e.logf("console", "Auto IP: updated to "+my)
 				n.UpdateOptions(func(op *storageOptions) { op.MNIP = my })
 				_ = n.SaveOptions() // FIX: saveUpdatedFiles was a no-op
@@ -293,7 +293,7 @@ func (e *Engine) queueMNReport(line string) {
 	if p < 0 {
 		return
 	}
-	m, ok := node.ParseMNode(line[p:])
+	m, ok := e.N.ParseMN(line[p:])
 	if !ok {
 		return
 	}
@@ -332,7 +332,7 @@ func (e *Engine) GetMyIP() string {
 		if i >= 3 {
 			break
 		}
-		if ip := e.RequestLine(h.ip, int(codec.StrToIntDef(h.port, 8080)), "GETMIIP"); codec.IsValidIP(ip) {
+		if ip := e.RequestLine(h.ip, int(codec.StrToIntDef(h.port, 8080)), "GETMIIP"); e.N.ValidMNIP(ip) {
 			votes[ip]++
 		}
 	}
@@ -356,7 +356,7 @@ func (e *Engine) RunMNVerification(block int64, synctus, localIP, pub, priv stri
 	done := make(chan struct{}, len(list)+1)
 	launched := 0
 	for _, m := range list {
-		if m.IP != localIP && codec.IsValidIP(m.IP) {
+		if m.IP != localIP && n.ValidMNIP(m.IP) {
 			launched++
 			go func(m node.MNode) {
 				defer func() { done <- struct{}{} }()
@@ -531,7 +531,7 @@ func (e *Engine) challengeReport(line string) bool {
 	if p < 0 {
 		p = 0
 	}
-	m, ok := node.ParseMNode(line[p:])
+	m, ok := e.N.ParseMN(line[p:])
 	if !ok {
 		return false
 	}

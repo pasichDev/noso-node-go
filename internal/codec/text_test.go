@@ -66,3 +66,25 @@ func TestIsValidIP(t *testing.T) {
 		}
 	}
 }
+
+// A network may allow masternodes on loopback and private addresses, and only
+// those; every other special range stays refused.
+func TestIsValidMNIP(t *testing.T) {
+	for ip, want := range map[string]bool{
+		"127.0.0.1": true, "10.1.2.3": true, "172.16.0.9": true, "192.168.1.5": true, "8.8.8.8": true,
+		"0.0.0.1": false, "169.254.1.1": false, "224.0.0.1": false, "100.64.0.1": false, "198.51.100.1": false,
+		"172.32.0.1": true, "127.0.0.1.5": false, "0x7f.0.0.1": false, "127.00.0.1": false,
+	} {
+		local := IsValidMNIP(ip, true)
+		if local != want {
+			t.Errorf("local rule: %q = %v, want %v", ip, local, want)
+		}
+		strict := IsValidMNIP(ip, false)
+		if strict != IsValidIP(ip) {
+			t.Errorf("strict rule differs from IsValidIP for %q", ip)
+		}
+		if (ip == "127.0.0.1" || ip == "10.1.2.3" || ip == "192.168.1.5") && strict {
+			t.Errorf("strict rule accepted %q", ip)
+		}
+	}
+}

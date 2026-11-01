@@ -163,6 +163,17 @@ default chain id and the strict address rule, and its blocks commit to the
 proposer list alone, as before. The file is parsed strictly: both keys exactly
 once, no other key.
 
+## Masternode addresses
+
+A masternode report names an IPv4 address that the other nodes dial. By default
+only a public unicast address is accepted (loopback, private, link-local,
+multicast and the documentation ranges are not, `codec.IsValidIP`). A network
+whose `network.txt` sets `local_masternodes true` also accepts loopback and
+private-use addresses (`codec.IsValidMNIP`), for a network that lives on one
+machine or one LAN. The value is a rule of the network, so it is read from the
+file only and is part of what blocks commit to; a node with another value is on
+another chain. One address can be used by one masternode.
+
 ## Commit, crash safety and the state root
 
 Every sealed block carries, in the `Solution` header field, `NSR1 <state root>

@@ -144,7 +144,19 @@ func (n *Node) IsLegitNewNode(m MNode, block int64) bool {
 }
 
 // ParseMNode mirrors GetMNodeFromString (nosomasternodes.pas:447-476).
-func ParseMNode(s string) (MNode, bool) {
+func ParseMNode(s string) (MNode, bool) { return ParseMNodeFor(s, false) }
+
+// ParseMN parses a report under the masternode address rule of this node's
+// network (network file, local_masternodes).
+func (n *Node) ParseMN(s string) (MNode, bool) { return ParseMNodeFor(s, n.LocalMasternodes()) }
+
+// ValidMNIP reports whether ip may be the address of a masternode of this
+// network: public unicast, or also loopback and private when the network file
+// sets local_masternodes.
+func (n *Node) ValidMNIP(ip string) bool { return codec.IsValidMNIP(ip, n.LocalMasternodes()) }
+
+// ParseMNodeFor is ParseMNode with the network's address rule.
+func ParseMNodeFor(s string, local bool) (MNode, bool) {
 	p := func(i int64) string { return codec.Parameter(s, i) }
 	m := MNode{
 		IP:          codec.Truncate(p(1), 15),
@@ -162,7 +174,7 @@ func ParseMNode(s string) (MNode, bool) {
 		Deleg:       p(13),
 	}
 	switch {
-	case !codec.IsValidIP(m.IP):
+	case !codec.IsValidMNIP(m.IP, local):
 		return m, false
 	case m.Port < 0 || m.Port > 65535:
 	case !crypto.IsValidHashAddress(m.Sign):
@@ -229,7 +241,7 @@ func (n *Node) CheckMNReport(line string, block int64) string {
 		p = 0
 	}
 	info := line[p:]
-	m, ok := ParseMNode(info)
+	m, ok := n.ParseMN(info)
 	// FIX(H-01): a report is bound to the current block.
 	if !ok || int64(m.First) != block || int64(m.Last) != block || !n.IsLegitNewNode(m, block) {
 		return ""

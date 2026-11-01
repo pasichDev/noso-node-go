@@ -79,7 +79,13 @@ func ExtractMNsText(s string) string {
 // accepted forms such as "1.2.3.4.5", "0x7f.0.0.1", and every private,
 // loopback, link-local, multicast and reserved range except 192.168/16 and
 // 127.0/16.
-func IsValidIP(ip string) bool {
+func IsValidIP(ip string) bool { return IsValidMNIP(ip, false) }
+
+// IsValidMNIP is IsValidIP for the address of a masternode. With local set
+// (the local_masternodes rule of a network, which comes only from its network
+// file) loopback and private-use ranges (127/8, 10/8, 172.16/12, 192.168/16)
+// are accepted as well; every other special range stays refused.
+func IsValidMNIP(ip string, local bool) bool {
 	parts := strings.Split(ip, ".")
 	if len(parts) != 4 {
 		return false
@@ -100,6 +106,12 @@ func IsValidIP(ip string) bool {
 			return false
 		}
 		v[i] = n
+	}
+	if local {
+		switch {
+		case v[0] == 127, v[0] == 10, v[0] == 172 && v[1] >= 16 && v[1] <= 31, v[0] == 192 && v[1] == 168:
+			return true
+		}
 	}
 	switch {
 	case v[0] == 0, v[0] == 10, v[0] == 127, v[0] >= 224:

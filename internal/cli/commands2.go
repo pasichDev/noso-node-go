@@ -823,7 +823,7 @@ func cmdMNSet(d *Dispatcher, l string) {
 	switch {
 	case ip == "" || sign == "" || funds == "":
 		d.fail("Syntax: mnset {ip} {port} {funds address} {sign address}")
-	case !codec.IsValidIP(ip):
+	case !d.N.ValidMNIP(ip):
 		d.fail("Invalid IP")
 	case codec.StrToIntDef(port, -1) < 1 || codec.StrToIntDef(port, -1) > 65535:
 		d.fail("Invalid port")

@@ -37,11 +37,23 @@ func (d *devnet) virtual() int64 {
 // newDevnet creates n nodes, the first `proposers` of which hold the proposer
 // keys. Listeners are opened on free loopback ports before anything starts.
 func newDevnet(t *testing.T, n, proposers int, speed int64) *devnet {
+	return newDevnetWith(t, n, proposers, speed, nil)
+}
+
+// newDevnetWith gives every node the network file cfg (nil: no file, the
+// default network).
+func newDevnetWith(t *testing.T, n, proposers int, speed int64, cfg *node.NetworkConfig) *devnet {
 	t.Helper()
 	d := &devnet{t: t, speed: speed, wall0: time.Now()}
 	d.base = time.Now().Unix()/consensus.SecondsPerBlock*consensus.SecondsPerBlock + consensus.SecondsPerBlock + 15
 	for i := 0; i < n; i++ {
-		nd, err := node.New(filepath.Join(t.TempDir(), "NOSODATA"), nil)
+		dir := filepath.Join(t.TempDir(), "NOSODATA")
+		if cfg != nil {
+			if err := node.WriteNetworkConfig(dir, *cfg); err != nil {
+				t.Fatal(err)
+			}
+		}
+		nd, err := node.New(dir, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
