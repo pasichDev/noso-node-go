@@ -116,16 +116,16 @@ RPCSaveNew, RPCBanned, MaxPeers, PosWarning. Lines starting with `//` and
 * `LockDataDir(root)` takes an exclusive flock (Windows: LockFileEx) on
   `root/.lock` and returns `ErrDataDirLocked` to a second holder. Every writer
   holds it for its whole life (nosod, the GUI, and nosocli when it opens the
-  directory itself). After locking it runs `RecoverDataDir`: finishes or
-  discards an interrupted `Txn` and removes `*.tmp` / `*.new` debris
-  (wallet temporaries are overwritten first).
-* `Txn` (`NewTxn(root)`, `Add(path, data)`, `Commit()`) replaces several whole
-  files atomically: files are staged as `<path>.new`, a checksummed manifest
-  `commit.journal` is written atomically (the commit point), the files are
-  renamed, the manifest removed. A crash leaves all old or all new files.
-  Whole-file only; one transaction at a time; `ErrTxnPending` means the
-  journal is durable and restart completes it. Intended for the block file +
-  headers + small state files; the in-place summary is not covered.
+  directory itself). After locking it runs `RecoverDataDir`, which removes
+  `*.tmp` / `*.new` debris (wallet temporaries are overwritten first; a link with
+  such a name is removed as a link and never followed). The lock file and the
+  data directory are checked first: `.lock` must be a regular file, never a
+  link, and an existing data directory must belong to the user (root excepted).
+* There is no multi-file `Txn` (it was never used by the node and a
+  `commit.journal` in the data directory was a way to replace files outside it,
+  F-13). The node changes its chain through its own journal (`JOURNAL`,
+  `node/commit.go`), which names the block it hangs on (number and identity
+  hash) and is discarded at start when the chain on disk does not fit.
 * The data directory is created and kept 0700, wallet files and `advopt.txt`
   0600 (existing 0644 files are tightened when opened or saved). Windows: modes
   and `os.Chmod` do nothing there. The directory inherits the ACL of its parent;

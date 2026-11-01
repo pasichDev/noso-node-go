@@ -44,6 +44,29 @@ type journal struct {
 	Last    int64  `json:"last"`    // tip when the change began
 	Start   int64  `json:"start"`   // first block of the change (stage 2)
 	Count   int    `json:"count"`   // blocks in JOURNAL.d (stage 2)
+	// Anchor is the block the change hangs on and AnchorHash its identity hash:
+	// the tip for stage 1 (nothing has been written yet), the block before the
+	// first new block for stage 2. FIX(F-13): a journal that does not fit the
+	// chain on disk (a stale or planted file) is discarded, never run.
+	Anchor     int64  `json:"anchor"`
+	AnchorHash string `json:"anchorHash"`
+}
+
+// fits reports whether the journal belongs to the chain in the blocks
+// directory.
+func (n *Node) journalFits(j journal) bool {
+	if j.AnchorHash == "" || j.Anchor < 0 || j.Last < 0 {
+		return false
+	}
+	have := n.Blocks.LastUpdated()
+	if j.Count == 0 {
+		if have != j.Last || j.Anchor != j.Last {
+			return false
+		}
+	} else if j.Anchor != j.Start-1 || have < j.Anchor {
+		return false
+	}
+	return storage.Exists(n.Lay.BlockFile(j.Anchor)) && crypto.IDHashFile(n.Lay.BlockFile(j.Anchor)) == j.AnchorHash
 }
 
 func (n *Node) journalPath() string { return filepath.Join(n.Lay.Root, journalFile) }
@@ -57,7 +80,8 @@ func (n *Node) writeJournal(j journal) error {
 // beginJournal is stage 1: the snapshot <restore> holds the state of the
 // chain whose tip is last.
 func (n *Node) beginJournal(restore string, last int64) error {
-	return n.writeJournal(journal{Restore: restore, Last: last})
+	return n.writeJournal(journal{Restore: restore, Last: last, Anchor: last,
+		AnchorHash: crypto.IDHashFile(n.Lay.BlockFile(last))})
 }
 
 // commitJournal is stage 2, the commit point.
@@ -79,7 +103,8 @@ func (n *Node) commitJournal(restore string, last, start int64, blocks map[int64
 	}
 	syncDir(n.journalDir())
 	syncDir(n.Lay.Root)
-	return n.writeJournal(journal{Restore: restore, Last: last, Start: start, Count: len(blocks)})
+	return n.writeJournal(journal{Restore: restore, Last: last, Start: start, Count: len(blocks), Anchor: start - 1,
+		AnchorHash: crypto.IDHashFile(n.Lay.BlockFile(start - 1))})
 }
 
 func (n *Node) endJournal() {
@@ -98,7 +123,7 @@ func (n *Node) recoverLocked() error {
 	raw, err := os.ReadFile(n.journalPath())
 	if err == nil {
 		var j journal
-		if json.Unmarshal(raw, &j) != nil || j.Restore == "" || strings.ContainsAny(j.Restore, "/\\.") || !n.hasSnapshot(j.Restore) {
+		if json.Unmarshal(raw, &j) != nil || j.Restore == "" || strings.ContainsAny(j.Restore, "/\\.") || !n.hasSnapshot(j.Restore) || !n.journalFits(j) {
 			n.endJournal()
 			return n.repairLocked("journal unusable")
 		}

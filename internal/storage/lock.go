@@ -31,9 +31,19 @@ func LockDataDir(root string) (*DirLock, error) {
 		return nil, err
 	}
 	p := filepath.Join(root, ".lock")
+	// FIX(F-14): the lock file is never a link, so opening it cannot truncate
+	// (below) a file somewhere else.
+	pre, lerr := os.Lstat(p)
+	if lerr == nil && !pre.Mode().IsRegular() {
+		return nil, fmt.Errorf("storage: %s is not a regular file; remove it", p)
+	}
 	f, err := os.OpenFile(p, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, err
+	}
+	if st, serr := f.Stat(); serr != nil || !st.Mode().IsRegular() || (lerr == nil && !os.SameFile(pre, st)) {
+		_ = f.Close()
+		return nil, fmt.Errorf("storage: %s changed while it was being opened", p)
 	}
 	if err := lockFile(f); err != nil {
 		_ = f.Close()

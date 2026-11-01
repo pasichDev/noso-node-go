@@ -83,7 +83,14 @@ func (l Layout) EnsureDirs() int {
 			failed++
 		}
 	}
-	_ = os.Chmod(l.Root, 0o700)
+	// FIX(F-14): an existing directory must belong to us, and tightening it
+	// must work: a directory somebody else owns could be changed under the
+	// node, and a failed chmod would leave the wallet readable.
+	if st, err := os.Stat(l.Root); err != nil || !ownedByUs(st) {
+		failed++
+	} else if err := os.Chmod(l.Root, 0o700); err != nil && runtime.GOOS != "windows" {
+		failed++
+	}
 	return failed
 }
 
