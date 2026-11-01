@@ -25,7 +25,7 @@ jobs:
           if [ -n "$out" ]; then echo "gofmt needed:"; echo "$out"; exit 1; fi
       - name: go vet
         run: go vet ./...
-      - name: go test -race (no -short: the multi-node and process tests run here)
+      - name: go test -race, without -short so the multi-node and process tests run
         run: go test -race -count=1 -timeout 25m ./...
       - name: verify module checksums
         run: go mod verify
