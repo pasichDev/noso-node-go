@@ -1,16 +1,48 @@
-# noso-node-go
+<p align="center">
+  <img src="docs/assets/noso-logo.png" alt="Noso coin logo" width="128" height="128">
+</p>
 
-A Go implementation of the Noso cryptocurrency node. It reads and writes the
-file formats of the original Free Pascal node and keeps its rules for balances,
-orders and rewards. The original public network is inactive, so this port does
-not try to join it: it runs **its own networks**, whose blocks are sealed by a
-list of proposers (see [docs/consensus.md](docs/consensus.md)). No peer address
-is compiled in; a node connects to the seeds you write for it.
+<h1 align="center">noso-node-go</h1>
 
-> **This is an independent, unofficial port.** It is not made, endorsed or
-> supported by the Noso project or its developers. The original node lives at
-> <https://github.com/nosocoin/NosoNode>. Use this software at your own risk,
-> and do not keep funds on a wallet you have not backed up.
+<p align="center">
+  A Go node for the Noso coin: daemon, command line and desktop wallet.
+</p>
+
+<p align="center">
+  <a href="https://github.com/pasichDev/noso-node-go/actions/workflows/ci.yml"><img src="https://github.com/pasichDev/noso-node-go/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI status"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Unlicense-blue.svg" alt="License: Unlicense"></a>
+  <img src="https://img.shields.io/badge/go-1.27.3-00ADD8.svg?logo=go&logoColor=white" alt="Go 1.27.3">
+  <img src="https://img.shields.io/badge/status-experimental-orange.svg" alt="Status: experimental">
+</p>
+
+noso-node-go is a Go rewrite of the Free Pascal Noso node. It keeps the original
+file formats and the rules for balances, orders and rewards. The original public
+network is inactive, so this node does not try to join it. It runs **its own
+networks**, whose blocks are sealed by a fixed list of proposers
+([consensus](docs/consensus.md)). No peer address is compiled in; a node connects
+to the seeds you give it.
+
+> **Independent and unofficial.** This project is not made, endorsed or supported
+> by the Noso project or its developers. The logo belongs to the original project,
+> whose repository is at <https://github.com/nosocoin/NosoNode>.
+> This software is experimental and has had no independent security audit. Do not
+> use it to hold anything of value.
+
+## Project status
+
+| Area | State |
+|---|---|
+| Local multi-node network | Works: four real processes reach one chain of 50 blocks, with an order over RPC, a restart and a healed partition |
+| Chain from genesis | A real chain crosses block 8428 and syncs to a second node; blocks 48010 and 88500 are covered only with a synthetic fast-forward |
+| Wallet | Encrypted by default, with migration from `wallet.pkw` |
+| Desktop app | Exercised with the Fyne test driver only; not clicked through by hand |
+| Windows | Builds; never run |
+| Pascal nodes | Blocks and several messages differ, see [compatibility](docs/compatibility.md); never tested against a running Pascal node |
+| Security | 43 findings of the original are tracked in [SECURITY_REVIEW.md](SECURITY_REVIEW.md); internal review only |
+
+Consensus is proof of authority: a proposer on the list can censor orders or sign
+two blocks for one slot, and a heavier branch can rewrite history. Blocks and
+wallets may change without a migration path until a first release.
 
 ## What is in the box
 
@@ -18,12 +50,12 @@ is compiled in; a node connects to the seeds you write for it.
 |---|---|
 | `nosod` | The node daemon: peer-to-peer server and client, block builder, JSON-RPC server, local control socket. |
 | `nosocli` | The console commands of the original node as a command line tool. Talks to a running `nosod`, or works on the data directory directly when none is running. |
-| `nosogui` | A desktop front end (Fyne 2.8) that uses the same packages as the other two. Built with `-tags gui`; needs a C compiler and OpenGL/X11 headers. Not visually verified, see docs/port-status.md. |
+| `nosogui` | A desktop front end (Fyne 2.8) that uses the same packages as the other two. Built with `-tags gui`; needs a C compiler and OpenGL/X11 headers. See [port status](docs/port-status.md) for what each screen has been verified with. |
 
 All three use the same data directory layout as the original (`NOSODATA/`):
 `sumary.psk`, `blchhead.nos`, `gvts.psk`, `nosocfg.psk`, `masternodes.txt`,
-`wallet.pkw`, `psos.dat`, `advopt.txt`, `BLOCKS/*.blk`. You can point `nosod`
-at the data directory of a Pascal node (stop that node first).
+`wallet.enc`, `psos.dat`, `advopt.txt`, `BLOCKS/*.blk`. A `wallet.pkw` from a
+Pascal node is migrated, and the original file is kept until you retire it.
 
 ## Quick start
 
