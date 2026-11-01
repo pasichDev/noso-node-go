@@ -143,8 +143,9 @@ records. It decides nothing about blocks, the summary, headers, GVTs or PSOs.
   flight; a wrong claim costs one request.
 * The answer goes to `node.StageBlocks`: seals, links, orders and the state are
   checked and the heavier branch wins (`consensus.md`). A fork, a lighter
-  branch, an empty answer or a branch below the old horizon never closes the
-  connection; only a peer that sends three invalid archives is dropped.
+  branch or an empty answer never closes the connection; only a peer that sends
+  three invalid archives is dropped. A peer that sends an unsealed block is held
+  back from block pull at once.
 * `SyncWithMainnet` (every 4 s, block age 10-595) still requests the
   configuration, the masternode file, reported masternodes and verification
   records on the seed consensus; it never touches blocks or state files.

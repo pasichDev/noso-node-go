@@ -91,14 +91,16 @@ Status of the final audit's findings and of the consensus, operator and complete
 | Ref | Finding | Status |
 |---|---|---|
 | F-1 | One proposer rewrites history at any depth | Accepted, trust model: proposers are fully trusted, there is no finality, the documents say so and no longer offer a confirmation count |
-| F-2 | One peer stops proposers building and owns block pull | Open (network layer) |
+| F-2 | One peer stops proposers building and owns block pull | Fixed: a claimed height never stops building, an impossible claim is ignored, block pull rotates and holds back peers that fail it. `TestClaimedHeightNeverStopsBuilding`, `TestImpossibleClaimIsNeverPulled`, `TestPullRotatesAndHoldsBackLiars` |
 | F-3 | A free order evicts honest orders | Fixed for the free variant: `OrderLines`/`TrxLine`/`OrderID` checked at pool admission, the builder judges a malformed line alone, the pool is bounded and refuses instead of evicting. Not closed: a funded flood of valid orders can still delay honest ones for a period at the price of the fees of the ~2000 it gets mined (no fee market). `TestFinal_OrderLinesCannotSwallowOthers`, `TestFinal_PoolIsBounded` |
 | F-4 | A proposer lists only itself for the masternode pool | Accepted, trust model; the unpaid share now goes to the miner as in the original (no burn), so supply equals `GetSupply`. `TestFinal_UnpaidMasternodeShareGoesToTheMiner` |
 | F-5 | One stake burns report slots | Fixed: the IP slot is taken after the `MNVER` challenge. `TestFinal_FailedReportDoesNotBurnTheIPSlot` |
-| F-6 | Control socket hands out keys | Open |
+| F-6 | Control socket hands out keys | Fixed: key commands over the socket need the passphrase. `TestControlSocketKeepsKeysBehindThePassphrase` |
 | F-7 | `wallet retire-legacy` can destroy a key | Fixed: whole-record check, all copies covered, links refused. `TestFinalRetireRefusesATornTail`, `TestFinalRetireCoversEveryCopyAndNeverFollowsLinks` |
 | F-8 | Staged branch memory and lock time | Fixed (node side): bounded in blocks and bytes, each window verified once, future/off-grid blocks refused before they are kept, a stale stage is dropped. `TestFinal_StagedBranchIsBounded`, `TestFinal_StaleStagedSiblingDoesNotPoisonTheNextBlock` |
-| F-9..F-11, F-12..F-20 | See the final audit | Not addressed in this round |
+| F-10 | Fake entries in `getpendingorders` | Fixed: the fields are cleaned |
+| F-11 | 99 inbound peers fill every slot | Fixed: slots reserved for outbound, inbound limited per network. `TestInboundCannotFillEverySlot`, `TestInboundLimitedPerNetwork` |
+| F-9, F-12..F-20 | See the final audit | Open |
 | consensus 2 | Crash while genesis is written forks the node | Fixed: `TestFinal_CrashDuringGenesisEveryPoint`, `TestFinal_DoubleCrashDuringGenesis` |
 | consensus 3 | Forks between probe windows never found | Fixed: `TestFinal_DeepForksResolve` (depth 170 and 330) |
 | consensus 4 | Out-of-turn proposer takes a slot | Fixed: `OutOfTurnGrace`. `TestFinal_OutOfTurnBlockWaitsForTheGracePeriod` |
