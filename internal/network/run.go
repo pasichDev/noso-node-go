@@ -293,12 +293,14 @@ func (e *Engine) queueMNReport(line string) {
 	if p < 0 {
 		return
 	}
-	m, ok := e.N.ParseMN(line[p:])
+	m, ok := e.N.ParseMNShape(line[p:])
 	if !ok {
 		return
 	}
 	block := n.MyLastBlock()
-	if int64(m.First) != block || int64(m.Last) != block || !n.IsLegitNewNode(m, block) {
+	// FIX(F-20): the stake and block checks cost a lookup; the signatures cost
+	// up to three ECDSA verifications, so they come last.
+	if int64(m.First) != block || int64(m.Last) != block || !n.IsLegitNewNode(m, block) || !m.SigOK() {
 		return
 	}
 	if n.WaitingMNsLen() >= maxWaitingMNs {

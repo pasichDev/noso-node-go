@@ -157,6 +157,17 @@ func (n *Node) ValidMNIP(ip string) bool { return codec.IsValidMNIP(ip, n.LocalM
 
 // ParseMNodeFor is ParseMNode with the network's address rule.
 func ParseMNodeFor(s string, local bool) (MNode, bool) {
+	m, ok := parseMNShape(s, local)
+	return m, ok && m.SigOK()
+}
+
+// ParseMNShape parses a report and checks its shape, the address rule and the
+// bindings that cost a hash, but not its signatures, which cost an ECDSA
+// verification each (up to three). A caller that can refuse a report on a
+// cheaper ground first (stake, block) does so and calls SigOK after (FIX(F-20)).
+func (n *Node) ParseMNShape(s string) (MNode, bool) { return parseMNShape(s, n.LocalMasternodes()) }
+
+func parseMNShape(s string, local bool) (MNode, bool) {
 	p := func(i int64) string { return codec.Parameter(s, i) }
 	m := MNode{
 		IP:          codec.Truncate(p(1), 15),
@@ -182,14 +193,21 @@ func ParseMNodeFor(s string, local bool) (MNode, bool) {
 	case m.First < 0, m.Last < 0, m.Total < 0, m.Validations < 0:
 	case m.Hash != crypto.IDHash(m.IP+codec.IntToStr(int64(m.Port))+m.Sign+m.Fund):
 	case crypto.GetAddressFromPublicKey(m.Pub, 0) != m.Fund:
-	case m.SignPub == "" && !crypto.VerifyCanonical(m.Pub, m.Sig, "MNREPORT1", mnReportFields(m)...):
-	case m.SignPub != "" && (crypto.GetAddressFromPublicKey(m.SignPub, 0) != m.Sign ||
-		!crypto.VerifyCanonical(m.Pub, m.Deleg, "MNDELEG1", m.Sign, m.Fund) ||
-		!crypto.VerifyCanonical(m.SignPub, m.Sig, "MNREPORT1", mnReportFields(m)...)):
+	case m.SignPub != "" && crypto.GetAddressFromPublicKey(m.SignPub, 0) != m.Sign:
 	default:
 		return m, true
 	}
 	return m, false
+}
+
+// SigOK verifies the signatures of a report parsed by ParseMNShape: the
+// report signature, and for a delegated report also the delegation.
+func (m MNode) SigOK() bool {
+	if m.SignPub == "" {
+		return crypto.VerifyCanonical(m.Pub, m.Sig, "MNREPORT1", mnReportFields(m)...)
+	}
+	return crypto.VerifyCanonical(m.Pub, m.Deleg, "MNDELEG1", m.Sign, m.Fund) &&
+		crypto.VerifyCanonical(m.SignPub, m.Sig, "MNREPORT1", mnReportFields(m)...)
 }
 
 // mnReportFields are the signed fields of a report. FIX(H-01): the original
@@ -241,9 +259,10 @@ func (n *Node) CheckMNReport(line string, block int64) string {
 		p = 0
 	}
 	info := line[p:]
-	m, ok := n.ParseMN(info)
-	// FIX(H-01): a report is bound to the current block.
-	if !ok || int64(m.First) != block || int64(m.Last) != block || !n.IsLegitNewNode(m, block) {
+	m, ok := n.ParseMNShape(info)
+	// FIX(H-01): a report is bound to the current block. FIX(F-20): the cheap
+	// grounds (block, stake) come before the signatures.
+	if !ok || int64(m.First) != block || int64(m.Last) != block || !n.IsLegitNewNode(m, block) || !m.SigOK() {
 		return ""
 	}
 	n.mn.mu.Lock()
