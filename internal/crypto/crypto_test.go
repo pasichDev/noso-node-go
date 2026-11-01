@@ -149,7 +149,7 @@ func TestLowSEnforced(t *testing.T) {
 	kp := GenerateKeyPair()
 	for i := 0; i < 20; i++ {
 		sig := SignCanonical(kp.PrivateKey, "D", "x", string(rune('a'+i)))
-		der := DecodeBase64(sig)
+		der := DecodeBase64Lenient(sig)
 		var sg ecdsaSig
 		if _, err := asn1.Unmarshal(der, &sg); err != nil {
 			t.Fatal(err)
@@ -191,7 +191,7 @@ func TestIDHash(t *testing.T) {
 func TestBase64(t *testing.T) {
 	for _, s := range []string{"", "f", "fo", "foo", "foob", "fooba", "foobar"} {
 		enc := EncodeBase64([]byte(s))
-		if string(DecodeBase64(enc)) != s {
+		if string(DecodeBase64Lenient(enc)) != s {
 			t.Errorf("%q", s)
 		}
 	}
@@ -229,7 +229,7 @@ func FuzzParsersNoPanic(f *testing.F) {
 		B58ToB10(s)
 		B10ToB58(s)
 		B10ToB16(s)
-		DecodeBase64(s)
+		DecodeBase64Lenient(s)
 		CheckCertificate(s, s, s)
 		VerifyCanonical(s, s, s, s)
 		GetMultiSource(s, 2)
@@ -237,18 +237,18 @@ func FuzzParsersNoPanic(f *testing.F) {
 }
 
 // Expected values derived by hand from fcl-base base64.pp (GetSize, Read).
-func TestDecodeBase64FPCMime(t *testing.T) {
+func TestDecodeBase64LenientFPCMime(t *testing.T) {
 	for in, want := range map[string]string{
 		"QUJD": "ABC", "QUI=": "AB", "QUI": "AB", "QQ==": "A", "QQ": "A", "QUJDQUI*": "ABC",
 		"QUJDQU": "ABCA", "": "", "QU==QUJD": "A", "Q": "", "QUJD\nQUJD": "ABCABC", "QU*JD": "ABC",
 		"=QUJ": "", "QUJDQUJD=": "ABCABC", "QUJDQUJDQUJ*": "ABCABC",
 	} {
-		if got := string(DecodeBase64(in)); got != want {
-			t.Errorf("DecodeBase64(%q) = %q want %q", in, got, want)
+		if got := string(DecodeBase64Lenient(in)); got != want {
+			t.Errorf("DecodeBase64Lenient(%q) = %q want %q", in, got, want)
 		}
 	}
 	for _, in := range []string{"", "A", "AB", "ABC", "abc\xff\x00"} {
-		if got := DecodeBase64(EncodeBase64([]byte(in))); string(got) != in {
+		if got := DecodeBase64Lenient(EncodeBase64([]byte(in))); string(got) != in {
 			t.Errorf("round trip %q: %q", in, got)
 		}
 	}
@@ -259,8 +259,8 @@ func FuzzDecodeBase64(f *testing.F) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, s string) {
-		_ = DecodeBase64(s)
-		b := DecodeBase64(EncodeBase64([]byte(s)))
+		_ = DecodeBase64Lenient(s)
+		b := DecodeBase64Lenient(EncodeBase64([]byte(s)))
 		if string(b) != s {
 			t.Fatalf("round trip %q -> %q", s, b)
 		}

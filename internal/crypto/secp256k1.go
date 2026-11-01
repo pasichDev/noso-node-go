@@ -1,6 +1,7 @@
 package crypto
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/asn1"
 	"math/big"
@@ -189,6 +190,11 @@ func ecdsaVerifyDigest(h, der []byte, pub point) bool {
 		return false
 	}
 	if sg.S.Cmp(secpHalfN) > 0 {
+		return false
+	}
+	// Strict DER: asn1.Unmarshal tolerates extra elements inside the SEQUENCE;
+	// the only accepted bytes are the re-marshalled (R, S).
+	if canon, err := asn1.Marshal(sg); err != nil || !bytes.Equal(canon, der) {
 		return false
 	}
 	e := new(big.Int).SetBytes(h)

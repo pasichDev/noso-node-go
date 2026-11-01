@@ -1,6 +1,9 @@
 package crypto
 
-import "strings"
+import (
+	"encoding/base64"
+	"strings"
+)
 
 const b64Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 
@@ -51,7 +54,7 @@ func b64Val(c byte) byte {
 	return b64NA
 }
 
-// DecodeBase64 reproduces base64.DecodeStringBase64(s) of FPC 3.2.x in its
+// DecodeBase64Lenient reproduces base64.DecodeStringBase64(s) of FPC 3.2.x in its
 // default MIME mode, statement by statement from fcl-base base64.pp
 // (DecodeStringBase64, TBase64DecodingStream.GetSize and .Read): the input is
 // first padded with '=' to a multiple of 4 (counting every byte, junk
@@ -62,10 +65,16 @@ func b64Val(c byte) byte {
 // "QUJDQUI*" gives "ABC" (the junk character leaves a trailing group that
 // GetSize does not count), "QUI" gives "AB".
 //
-// UNVERIFIED against a run: FPC is not installed. One uncertainty: if the
-// computed size is 0, TStream.CopyFrom may call Seek on the decoder, which
-// raises in FPC; here an empty result is returned.
-func DecodeBase64(s string) []byte {
+// LEGACY DATA ONLY (reading Pascal-era wallet key text). Never use it to
+// verify or to compare text; use DecodeBase64Strict.
+//
+// Verification status: the statement-by-statement port was checked against
+// the fcl-base source in fpc322/, not against a run (FPC is not installed on
+// the build machine), so the hand-derived examples are the only executable
+// evidence. One open point: if the computed size is 0, TStream.CopyFrom may
+// call Seek on the decoder, which raises in FPC; here an empty result is
+// returned.
+func DecodeBase64Lenient(s string) []byte {
 	if len(s) == 0 {
 		return []byte{}
 	}
@@ -172,4 +181,18 @@ func b64Read(sd string, size int64) []byte {
 		count--
 	}
 	return out
+}
+
+// DecodeBase64Strict is the decoder for everything that is verified or
+// compared: signatures, public keys, certificates. It accepts exactly the text
+// EncodeBase64 produces (standard alphabet, '=' padding, no junk, no
+// whitespace, zero trailing bits), so one byte string has one text. The
+// lenient decoder below skips bytes, which let a third party re-spell a signed
+// object and change its hash without a key (re2 H-1).
+func DecodeBase64Strict(s string) ([]byte, bool) {
+	b, err := base64.StdEncoding.Strict().DecodeString(s)
+	if err != nil || EncodeBase64(b) != s { // the second test rejects CR/LF, which the stdlib skips
+		return nil, false
+	}
+	return b, true
 }

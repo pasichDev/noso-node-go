@@ -38,7 +38,7 @@ func Canonical(domain string, fields ...string) []byte {
 // original ran the text through a lenient Base64 decoder first
 // (nosocrypto.pas:223).
 func SignCanonical(privB64, domain string, fields ...string) string {
-	d := new(big.Int).SetBytes(DecodeBase64(privB64))
+	d := new(big.Int).SetBytes(DecodeBase64Lenient(privB64)) // legacy key text
 	h := sha256.Sum256(Canonical(domain, fields...))
 	sig, ok := ecdsaSignDigest(h[:], d)
 	if !ok {
@@ -47,14 +47,24 @@ func SignCanonical(privB64, domain string, fields ...string) string {
 	return EncodeBase64(sig)
 }
 
-// VerifyCanonical checks a signature made by SignCanonical.
+// VerifyCanonical checks a signature made by SignCanonical. Key and signature
+// must be canonical Base64 and the signature canonical low-S DER: exactly one
+// text verifies per (key, message, R, S).
 func VerifyCanonical(pubB64, sigB64, domain string, fields ...string) bool {
-	pt, ok := decodePoint(DecodeBase64(pubB64))
+	pub, ok := DecodeBase64Strict(pubB64)
+	if !ok {
+		return false
+	}
+	sig, ok := DecodeBase64Strict(sigB64)
+	if !ok {
+		return false
+	}
+	pt, ok := decodePoint(pub)
 	if !ok {
 		return false
 	}
 	h := sha256.Sum256(Canonical(domain, fields...))
-	return ecdsaVerifyDigest(h[:], DecodeBase64(sigB64), pt)
+	return ecdsaVerifyDigest(h[:], sig, pt)
 }
 
 // Certificates ---------------------------------------------------------------
