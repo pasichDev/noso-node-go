@@ -27,8 +27,8 @@ func OrderFields(o types.Order, origin string) []string {
 // (mpcoin.pas:300) and never recomputed by receivers, so it could be changed
 // without invalidating the signature, and the same signed transfer could be
 // replayed under new ids.
-func OrderTrfrID(o types.Order, origin string) string {
-	return crypto.GetTransferHash(string(crypto.Canonical("TRFRID1", OrderFields(o, origin)...)))
+func OrderTrfrID(chain string, o types.Order, origin string) string {
+	return crypto.GetTransferHash(string(crypto.CanonicalFor(chain, "TRFRID1", OrderFields(o, origin)...)))
 }
 
 // SingleOrderID is the id of CUSTOM and SNDGVT orders.
@@ -65,7 +65,7 @@ func (n *Node) SealOrder(lines []types.Order) ([]types.Order, error) {
 		}
 		o.OrderLines, o.TrxLine = int32(len(lines)), int32(i+1)
 		o.Sender = w.PublicKey
-		SignOrder(&o, w.PrivateKey)
+		SignOrder(n.ChainID(), &o, w.PrivateKey)
 		out[i] = o
 	}
 	id := OrderGroupID(out)
@@ -77,28 +77,32 @@ func (n *Node) SealOrder(lines []types.Order) ([]types.Order, error) {
 }
 
 // SignOrder fills Signature and TrfrID of an order whose other fields are set.
-func SignOrder(o *types.Order, priv string) {
-	o.Signature = crypto.SignCanonical(priv, "ORDER1", OrderFields(*o, o.Address)...)
-	o.TrfrID = OrderTrfrID(*o, o.Address)
+//
+// FIX(F-18): the chain id of the network is part of the signed bytes and of
+// the transfer id, so an order signed on one network is neither valid nor
+// cached as valid on another.
+func SignOrder(chain string, o *types.Order, priv string) {
+	o.Signature = crypto.SignCanonicalFor(chain, priv, "ORDER1", OrderFields(*o, o.Address)...)
+	o.TrfrID = OrderTrfrID(chain, *o, o.Address)
 }
 
 // VerifyOrder checks the signature, the key-address binding and the TrfrID.
 // It returns a non-zero code on failure: 6 bad signature, 13 TrfrID not
 // derived from the signed fields, 14 key does not belong to the address.
-func VerifyOrder(o types.Order) int {
+func VerifyOrder(chain string, o types.Order) int {
 	if crypto.GetAddressFromPublicKey(o.Sender, 0) != o.Address {
 		return 14
 	}
-	if o.TrfrID != OrderTrfrID(o, o.Address) {
+	if o.TrfrID != OrderTrfrID(chain, o, o.Address) {
 		return 13
 	}
 	// A signature is checked once: pool admission and block validation ask
 	// about the same order, and an ECDSA verification costs milliseconds.
-	key := crypto.SHA256String(o.Sender + "|" + o.Signature + "|" + o.TrfrID)
+	key := crypto.SHA256String(chain + "|" + o.Sender + "|" + o.Signature + "|" + o.TrfrID)
 	if verified.has(key) {
 		return 0
 	}
-	if !crypto.VerifyCanonical(o.Sender, o.Signature, "ORDER1", OrderFields(o, o.Address)...) {
+	if !crypto.VerifyCanonicalFor(chain, o.Sender, o.Signature, "ORDER1", OrderFields(o, o.Address)...) {
 		return 6
 	}
 	verified.add(key)
@@ -183,7 +187,7 @@ func (n *Node) SendFundsFromAddress(origen, destino string, monto, comision int6
 		TrxLine: int32(line), Sender: w.PublicKey, Address: w.Hash, Receiver: destino,
 		AmmountFee: fee, AmmountTrf: trf,
 	}
-	SignOrder(&o, w.PrivateKey)
+	SignOrder(n.ChainID(), &o, w.PrivateKey)
 	o.Normalize()
 	return o, nil
 }

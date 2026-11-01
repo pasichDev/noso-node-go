@@ -31,7 +31,7 @@ func bad(format string, a ...any) error {
 // whose key it does not hold. Replay protection is the time window (an order
 // is only valid in the block interval it was signed for) plus the id test
 // against the previous block.
-func checkOrder(o types.Order, prev types.BlockHeader, blockTime int64) error {
+func (n *Node) checkOrder(o types.Order, prev types.BlockHeader, blockTime int64) error {
 	switch o.OrderType {
 	case "TRFR", "CUSTOM", "SNDGVT":
 	default:
@@ -52,7 +52,7 @@ func checkOrder(o types.Order, prev types.BlockHeader, blockTime int64) error {
 	if o.Sender == "" || len(o.Sender) > 120 {
 		return errors.New("missing public key")
 	}
-	if c := VerifyOrder(o); c != 0 {
+	if c := VerifyOrder(n.ChainID(), o); c != 0 {
 		return fmt.Errorf("order verification code %d", c)
 	}
 	switch o.OrderType {
@@ -126,7 +126,7 @@ func (n *Node) ValidateBlock(b *storage.Block, prev types.BlockHeader, prevHash 
 	// FIX(re2 3, 1): every header field is a function of the chain except the
 	// time slot, the miner and the orders. Nothing is left to grind, and the
 	// state root and the proposer list digest are committed.
-	if _, digest, ok := parseSolution(h.Solution); !ok || digest != proposersDigest(n.Proposers()) {
+	if _, digest, ok := parseSolution(h.Solution); !ok || digest != n.chainDigest() {
 		return bad("solution field is not the state commitment of this chain")
 	}
 	if h.TargetHash != codec.Truncate(prevHash, 32) || h.Difficult != 0 || h.TimeLast20 != 0 {
@@ -168,7 +168,7 @@ func (n *Node) ValidateBlock(b *storage.Block, prev types.BlockHeader, prevHash 
 		seen[o.TrfrID] = true
 		pool := o
 		pool.Sender = b.Keys[i]
-		if err := checkOrder(pool, prev, h.TimeEnd); err != nil {
+		if err := n.checkOrder(pool, prev, h.TimeEnd); err != nil {
 			return bad("order %d: %v", i, err)
 		}
 		if b.Keys[i] == "" {

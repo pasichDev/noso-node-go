@@ -388,7 +388,7 @@ func (n *Node) buildLocked(number, timestamp int64, targetHash, miner, solution 
 			var gk []string
 			okGroup := true
 			for _, ord := range group {
-				if checkOrder(ord, prev, timestamp) != nil {
+				if n.checkOrder(ord, prev, timestamp) != nil {
 					okGroup = false
 					break
 				}
@@ -501,7 +501,7 @@ func (n *Node) buildLocked(number, timestamp int64, targetHash, miner, solution 
 	}
 	if number > 0 {
 		// The block commits to the state it produces, then is sealed.
-		blk.Header.Solution = solutionFor(n.stateRoot(), proposersDigest(n.Proposers()))
+		blk.Header.Solution = solutionFor(n.stateRoot(), n.chainDigest())
 		sealBlock(blk, sw.PublicKey, sw.PrivateKey)
 		raw := blk.Encode()
 		if err := n.commitJournal(label, myLast, number, map[int64][]byte{number: raw}, nil); err != nil {

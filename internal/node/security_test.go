@@ -78,12 +78,12 @@ func TestC05_Overflow(t *testing.T) {
 	o, _ := n.SendFundsFromAddress(w.Hash, destAddr(), 1000000000, 1000000, "r", itoa(*now-30), 1)
 	o.AmmountTrf = math.MaxInt64 - 5
 	o.AmmountFee = 100 // sum wraps negative
-	SignOrder(&o, w.PrivateKey)
+	SignOrder(crypto.ChainID, &o, w.PrivateKey)
 	if c := n.ValidateTrfr(o, o.Address); c != 15 {
 		t.Fatalf("C-05: wrapping sum accepted (code %d)", c)
 	}
 	o.AmmountTrf, o.AmmountFee = -5, 1000000
-	SignOrder(&o, w.PrivateKey)
+	SignOrder(crypto.ChainID, &o, w.PrivateKey)
 	if c := n.ValidateTrfr(o, o.Address); c != 7 {
 		t.Fatalf("negative amount: %d", c)
 	}
@@ -114,7 +114,7 @@ func TestC06_CustomFee(t *testing.T) {
 	mk := func(fee int64, alias string) types.Order {
 		o := types.Order{OrderLines: 1, OrderType: "CUSTOM", TimeStamp: *now - 30, Reference: "null", TrxLine: 1,
 			Sender: w.PublicKey, Address: w.Hash, Receiver: alias, AmmountFee: fee}
-		SignOrder(&o, w.PrivateKey)
+		SignOrder(crypto.ChainID, &o, w.PrivateKey)
 		o.OrderID = SingleOrderID(o.TrfrID)
 		return o
 	}
@@ -172,7 +172,7 @@ func TestM14_GVTOwner(t *testing.T) {
 	n.GVTs.Save()
 	o := types.Order{OrderLines: 1, OrderType: "SNDGVT", TimeStamp: *now - 30, Reference: "5", TrxLine: 1,
 		Sender: w.PublicKey, Address: w.Hash, Receiver: destAddr(), AmmountFee: consensus.GetCustFee(1)}
-	SignOrder(&o, w.PrivateKey)
+	SignOrder(crypto.ChainID, &o, w.PrivateKey)
 	o.OrderID = SingleOrderID(o.TrfrID)
 	if c := n.PTCSendGVT(codecOpData(o)); c != 0 {
 		t.Fatalf("M-14: owner transfer refused (%d)", c)
@@ -180,7 +180,7 @@ func TestM14_GVTOwner(t *testing.T) {
 	stranger := newWalletAddr(n)
 	o2 := o
 	o2.Reference, o2.Sender, o2.Address = "6", stranger.PublicKey, stranger.Hash
-	SignOrder(&o2, stranger.PrivateKey)
+	SignOrder(crypto.ChainID, &o2, stranger.PrivateKey)
 	o2.OrderID = SingleOrderID(o2.TrfrID)
 	if c := n.PTCSendGVT(codecOpData(o2)); c == 0 {
 		t.Fatal("M-14: transfer of a GVT the sender does not own accepted")

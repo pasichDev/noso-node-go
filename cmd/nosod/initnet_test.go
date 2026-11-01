@@ -159,3 +159,34 @@ func TestJoinAcceptsPubkeyOutput(t *testing.T) {
 		t.Fatal("bind not written")
 	}
 }
+
+// init-network writes one network file, the same on every node, with a random
+// chain id; the loopback default sets local_masternodes, a public host does not.
+func TestInitNetworkWritesNetworkFile(t *testing.T) {
+	read := func(dir string, i int) string {
+		b, err := os.ReadFile(filepath.Join(dir, fmt.Sprintf("node%d", i), "network.txt"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	a, b := t.TempDir(), t.TempDir()
+	if rc, out := runInit(t, "-dir", a, "-nodes", "2", "-proposers", "1"); rc != 0 {
+		t.Fatalf("rc %d: %s", rc, out)
+	}
+	if rc, out := runInit(t, "-dir", b, "-nodes", "2", "-proposers", "1", "-host", "203.0.113.7", "-bind", "127.0.0.1"); rc != 0 {
+		t.Fatalf("rc %d: %s", rc, out)
+	}
+	if read(a, 1) != read(a, 2) || read(b, 1) != read(b, 2) {
+		t.Fatal("nodes of one network hold different network files")
+	}
+	if read(a, 1) == read(b, 1) {
+		t.Fatal("two networks share one network file")
+	}
+	if !strings.Contains(read(a, 1), "local_masternodes true") {
+		t.Fatal("a loopback network must allow local masternodes")
+	}
+	if !strings.Contains(read(b, 1), "local_masternodes false") {
+		t.Fatal("a non-loopback host must not allow local masternodes")
+	}
+}

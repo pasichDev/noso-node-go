@@ -152,7 +152,7 @@ func TestPendingRawInfoCannotBeForged(t *testing.T) {
 	o := types.Order{OrderLines: 1, OrderType: "CUSTOM", TimeStamp: 1699999921, TrxLine: 1,
 		Reference: "x\x7fa,1,TRFR,b,N3DthVsfEUtqrgWFHTEB6F88xLkT3Df,99900000000,1,r", Sender: w.PublicKey, Address: w.Hash,
 		Receiver: "goodalias", AmmountFee: consensus.GetCustFee(n.MyLastBlock() + 1)}
-	node.SignOrder(&o, w.PrivateKey)
+	node.SignOrder(crypto.ChainID, &o, w.PrivateKey)
 	o.OrderID = node.SingleOrderID(o.TrfrID)
 	if !n.AddPool(o) {
 		t.Skip("the pool already refuses such an order")

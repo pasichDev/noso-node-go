@@ -146,6 +146,23 @@ finality in the decision**. Consequences:
 
 The seeds' vote (`NODESTATUS`) only tells a node where to look.
 
+## The network file
+
+A data directory made by `nosod init-network` holds `network.txt` with two
+settings that are rules of the network: a random `chain_id` and
+`local_masternodes` (see Masternode addresses below). The file is the same on
+every node of the network and nothing else can set these values: no flag, no
+option. Its digest is folded into the digest every block commits to (the
+`Solution` field, next to the proposer list), so nodes with different settings
+refuse each other's blocks from block 1 on, and a node cannot start on a chain
+whose blocks commit to another file. The chain id is part of the bytes every
+order signs and of its transfer id (F-18), so an order signed on one network is
+not valid on another (`TestOrderSignedOnAnotherNetworkIsRefused`,
+`TestBlocksCommitToTheNetworkFile`). A data directory without the file uses the
+default chain id and the strict address rule, and its blocks commit to the
+proposer list alone, as before. The file is parsed strictly: both keys exactly
+once, no other key.
+
 ## Commit, crash safety and the state root
 
 Every sealed block carries, in the `Solution` header field, `NSR1 <state root>

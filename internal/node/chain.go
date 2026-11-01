@@ -53,10 +53,10 @@ func (n *Node) SetProposers(keys []string) error {
 	if len(clean) == 0 {
 		return errors.New("empty proposer list")
 	}
-	if cur := n.Proposers(); len(cur) > 0 && n.MyLastBlock() >= 1 && proposersDigest(cur) != proposersDigest(clean) {
+	if cur := n.Proposers(); len(cur) > 0 && n.MyLastBlock() >= 1 && n.chainDigestFor(cur) != n.chainDigestFor(clean) {
 		return errors.New("the proposer list is fixed once the chain has blocks")
 	}
-	if d, ok := n.committedDigest(); ok && d != proposersDigest(clean) {
+	if d, ok := n.committedDigest(); ok && d != n.chainDigestFor(clean) {
 		return errors.New("proposer list does not match the one the chain commits to")
 	}
 	if err := storage.WriteFileAtomic(filepath.Join(n.Lay.Root, proposersFile), []byte(strings.Join(clean, "\n")+"\n")); err != nil {
@@ -133,7 +133,7 @@ func (n *Node) loadProposers() error {
 	if len(keys) == 0 {
 		return errors.New("proposers.txt is empty")
 	}
-	if d, ok := n.committedDigest(); ok && d != proposersDigest(keys) {
+	if d, ok := n.committedDigest(); ok && d != n.chainDigestFor(keys) {
 		return errors.New("proposers.txt does not match the list the chain commits to")
 	}
 	n.chainState.mu.Lock()

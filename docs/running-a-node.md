@@ -73,7 +73,9 @@ creates `DEVNET/node1..node4`, each with its own wallet, the same
 on every node (all nodes, the node itself included, which never dials itself:
 the nodes vote on the hash of their configuration, so lists that differ never
 form a consensus and no masternode could be listed), `advopt.txt` with `Autoserver True`, `BuildBlocks True` for proposers,
-its peer port (`base+i-1`) and RPC port, a `bind.txt` and random RPC tokens.
+its peer port (`base+i-1`) and RPC port, a `bind.txt`, a `network.txt` (the same on
+every node: a random chain id and the `local_masternodes` rule, `yes` when `-host`
+is loopback, `-local-masternodes yes|no` overrides) and random RPC tokens.
 `-host` is the address the nodes tell each other; the peer listener binds
 `-bind` (default: `-host`, so `127.0.0.1` keeps the network on this machine; a
 plain `nosod` without `-bind` or `bind.txt` listens on every interface). The
@@ -91,8 +93,11 @@ or start `nosod` once), collect the proposers' public keys with
 are) and run
 
 ```sh
-./nosod init-network -data NOSODATA -proposer-keys proposers.txt -seed host1:8080 -seed host2:8080 [-propose]
+./nosod init-network -data NOSODATA -proposer-keys proposers.txt -network-file network.txt -seed host1:8080 -seed host2:8080 [-propose]
 ```
+
+(`network.txt` is copied from any node of the network. Without it the node uses the
+default chain id and refuses the blocks of the network.)
 
 which imports the keys, writes the seeds and `Autoserver True`, and with
 `-propose` turns block building on (the first wallet key must be in the list).

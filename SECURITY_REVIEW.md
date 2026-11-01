@@ -100,7 +100,8 @@ Status of the final audit's findings and of the consensus, operator and complete
 | F-8 | Staged branch memory and lock time | Fixed (node side): bounded in blocks and bytes, each window verified once, future/off-grid blocks refused before they are kept, a stale stage is dropped. `TestFinal_StagedBranchIsBounded`, `TestFinal_StaleStagedSiblingDoesNotPoisonTheNextBlock` |
 | F-10 | Fake entries in `getpendingorders` | Fixed: the fields are cleaned |
 | F-11 | 99 inbound peers fill every slot | Fixed: slots reserved for outbound, inbound limited per network. `TestInboundCannotFillEverySlot`, `TestInboundLimitedPerNetwork` |
-| F-9, F-12..F-20 | See the final audit | Open |
+| F-18 | Same chain id on every network | Changed: the chain id of the network file is signed into every order and its transfer id. `TestOrderSignedOnAnotherNetworkIsRefused`, `TestBlocksCommitToTheNetworkFile`, `TestParseNetworkConfigIsStrict`, `TestInitNetworkWritesNetworkFile` (written, not run). |
+| F-9, F-12..F-17, F-19, F-20 | See the final audit | Open |
 | consensus 2 | Crash while genesis is written forks the node | Fixed: `TestFinal_CrashDuringGenesisEveryPoint`, `TestFinal_DoubleCrashDuringGenesis` |
 | consensus 3 | Forks between probe windows never found | Fixed: `TestFinal_DeepForksResolve` (depth 170 and 330) |
 | consensus 4 | Out-of-turn proposer takes a slot | Fixed: `OutOfTurnGrace`. `TestFinal_OutOfTurnBlockWaitsForTheGracePeriod` |

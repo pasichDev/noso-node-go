@@ -41,14 +41,14 @@ func TestRW_ForgedSpendRejected(t *testing.T) {
 		return forge(t, a, ts, []types.Order{o}, []string{victimKey}), o
 	}
 	// 1: garbage signature, valid TrfrID (what the original accepted).
-	blk, _ := mk(func(o *types.Order) { o.Signature = "forged"; o.TrfrID = OrderTrfrID(*o, o.Address) })
+	blk, _ := mk(func(o *types.Order) { o.Signature = "forged"; o.TrfrID = OrderTrfrID(crypto.ChainID, *o, o.Address) })
 	if _, err := offer(f, blk); err == nil {
 		t.Fatal("C-03: a spend with a forged signature was accepted")
 	}
 	// 2: the proposer signs with its own key but names the victim's address.
 	blk, _ = mk(func(o *types.Order) {
 		o.Signature = crypto.SignCanonical(a.Wallet.At(0).PrivateKey, "ORDER1", OrderFields(*o, o.Address)...)
-		o.TrfrID = OrderTrfrID(*o, o.Address)
+		o.TrfrID = OrderTrfrID(crypto.ChainID, *o, o.Address)
 	})
 	if _, err := offer(f, blk); err == nil {
 		t.Fatal("C-03: a spend signed by another key was accepted")
@@ -57,7 +57,7 @@ func TestRW_ForgedSpendRejected(t *testing.T) {
 	own := a.Wallet.At(0)
 	o := types.Order{OrderLines: 1, OrderType: "TRFR", TimeStamp: ts - 100, Reference: "null", TrxLine: 1,
 		Sender: own.PublicKey, Address: victim.Hash, Receiver: attacker, AmmountFee: 1000000, AmmountTrf: 1000000000}
-	SignOrder(&o, own.PrivateKey)
+	SignOrder(crypto.ChainID, &o, own.PrivateKey)
 	o.Sender = o.Address
 	if _, err := offer(f, forge(t, a, ts, []types.Order{o}, []string{own.PublicKey})); err == nil {
 		t.Fatal("C-03: key that does not belong to the address accepted")

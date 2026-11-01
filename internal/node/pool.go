@@ -334,7 +334,7 @@ func (n *Node) ValidateTrfr(o types.Order, origen string) int {
 	case origen != o.Address:
 		return 13
 	}
-	return VerifyOrder(o)
+	return VerifyOrder(n.ChainID(), o)
 }
 
 // PTCOrder mirrors PTC_Order (mpprotocol.pas:842-948). It returns the new
@@ -515,7 +515,7 @@ func (n *Node) ptcCustom(line string, announce bool) int {
 	if o.OrderID != SingleOrderID(o.TrfrID) {
 		code = 12
 	}
-	if c := VerifyOrder(o); c != 0 {
+	if c := VerifyOrder(n.ChainID(), o); c != 0 {
 		code = c
 	}
 	if code == 0 {
@@ -575,7 +575,7 @@ func (n *Node) ptcSendGVT(line string, announce bool) int {
 	if o.OrderID != SingleOrderID(o.TrfrID) {
 		code = 12
 	}
-	if c := VerifyOrder(o); c != 0 {
+	if c := VerifyOrder(n.ChainID(), o); c != 0 {
 		code = c
 	}
 	if code == 0 {

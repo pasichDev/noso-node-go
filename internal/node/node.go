@@ -44,6 +44,10 @@ type Node struct {
 	Blocks  *storage.Blocks
 	DB      *storage.BlocksDB
 
+	// network is the network file of the data directory (see network.go).
+	network    NetworkConfig
+	hasNetwork bool
+
 	Opts   storage.Options
 	optsMu sync.Mutex
 
@@ -148,6 +152,9 @@ func NewWithConfig(root string, cfg Config) (*Node, error) {
 	n.Headers = storage.OpenHeaders(n.Lay.Headers)
 	if storage.Exists(n.Lay.AdvOpt) {
 		_ = n.Opts.Load(n.Lay.AdvOpt)
+	}
+	if err := n.loadNetwork(); err != nil {
+		return nil, err
 	}
 	n.MNFile = storage.OpenMNFile(n.Lay.Masternodes)
 	n.GVTs = storage.OpenGVTs(n.Lay.GVTs)

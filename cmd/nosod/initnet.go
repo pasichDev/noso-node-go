@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -106,6 +107,7 @@ func (c devClock) now() int64 {
 const initUsage = `usage:
   nosod init-network -dir DIR [-nodes 4] [-proposers 3] [-host 127.0.0.1] [-bind ADDR]
                      [-base-port 18080] [-rpc-base-port N] [-clock-scale N]
+                     [-local-masternodes auto|yes|no]
       Creates a new network on this machine: DIR/node1 ... DIR/nodeN, each with
       its own wallet, the same proposers file (the first -proposers nodes),
       the same seed list (all nodes) and ports base-port+i / rpc-base-port+i.
@@ -114,12 +116,18 @@ const initUsage = `usage:
       network never leaves loopback. The RPC server always binds loopback.
       The default RPC ports follow the peer ports (base-port+nodes+i); ports
       that overlap or are out of range are refused.
+      Every node gets the same network.txt: a random chain id (orders signed on
+      another network are refused) and the local_masternodes rule (yes when
+      -host is loopback, so masternodes may use 127.0.0.1; no otherwise). The
+      file is part of what blocks commit to; do not edit it.
       Works for any number of nodes from 1. Prints the public keys, never a
       private key. -clock-scale N runs the chain clock N times faster than real
       time (test networks only, see docs/running-a-node.md).
-  nosod init-network -data DATADIR -proposer-keys FILE [-seed host:port]... [-propose] [-bind ADDR]
+  nosod init-network -data DATADIR -proposer-keys FILE [-network-file FILE] [-seed host:port]... [-propose] [-bind ADDR]
       Prepares one data directory to join (or serve) a network made elsewhere:
-      imports the public keys of the proposers (one per line) and the seeds.
+      imports the public keys of the proposers (one per line), the seeds and,
+      when the network has one, its network.txt (copy it from any node of the
+      network; without it the node would be on another chain).
 
 The wallet passphrase comes from NOSO_WALLET_PASSPHRASE or -wallet-pass-file
 and is shared by the wallets this command creates.`
@@ -141,6 +149,8 @@ func initNetwork(args []string, stdout, stderr *os.File) int {
 	basePort := fs.Int("base-port", 18080, "peer port of node1; node i uses base+i-1")
 	rpcBase := fs.Int("rpc-base-port", 0, "RPC port of node1; node i uses base+i-1 (default: base-port+nodes; negative: no RPC)")
 	scale := fs.Int64("clock-scale", 1, "chain clock speed-up (test networks only)")
+	localMN := fs.String("local-masternodes", "auto", "masternodes may use loopback/private addresses: auto (yes when -host is loopback), yes or no")
+	netFile := fs.String("network-file", "", "with -data: the network.txt of the network to join")
 	passFile := fs.String("wallet-pass-file", "", "file holding the wallet passphrase")
 	data := fs.String("data", "", "single data directory to configure")
 	keysFile := fs.String("proposer-keys", "", "file with the public keys of the proposers")
@@ -157,7 +167,7 @@ func initNetwork(args []string, stdout, stderr *os.File) int {
 		return 2
 	}
 	if *data != "" {
-		return joinNetwork(*data, pass, *keysFile, seeds, *propose, *bind, stdout, stderr)
+		return joinNetwork(*data, pass, *keysFile, *netFile, seeds, *propose, *bind, stdout, stderr)
 	}
 	if *dir == "" || *nodes < 1 || *props < 1 || *props > *nodes || *scale < 1 {
 		fmt.Fprintln(stderr, initUsage)
@@ -171,6 +181,23 @@ func initNetwork(args []string, stdout, stderr *os.File) int {
 	bindAddr := *bind
 	if bindAddr == "" {
 		bindAddr = *host
+	}
+	// FIX(F-18): one random chain id per network, the same file on every node.
+	local := isLoopbackHost(*host)
+	switch *localMN {
+	case "auto":
+	case "yes":
+		local = true
+	case "no":
+		local = false
+	default:
+		fmt.Fprintln(stderr, "init-network: -local-masternodes is auto, yes or no")
+		return 2
+	}
+	netCfg, err := node.NewNetworkConfig(local)
+	if err != nil {
+		fmt.Fprintln(stderr, "init-network:", err)
+		return 1
 	}
 	// Open all wallets first: the proposers file needs every key.
 	var ns []*node.Node
@@ -196,8 +223,12 @@ func initNetwork(args []string, stdout, stderr *os.File) int {
 			return 1
 		}
 		locks = append(locks, l)
-		// the seed list is written before the node first opens its data, so
-		// nothing ever dials a default
+		// the network file is written before the node first opens its data
+		// (the node reads it then), so nothing ever runs on a default
+		if err := node.WriteNetworkConfig(d, netCfg); err != nil {
+			fmt.Fprintln(stderr, "init-network:", err)
+			return 1
+		}
 		n, err := node.NewWithConfig(d, node.Config{WalletPassphrase: pass})
 		if err != nil {
 			fmt.Fprintf(stderr, "init-network: %s: %v\n", d, err)
@@ -269,6 +300,15 @@ func initNetwork(args []string, stdout, stderr *os.File) int {
 	return 0
 }
 
+// isLoopbackHost reports whether host names this machine only.
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 // writeSeeds replaces the seed field of the node's nosocfg.psk.
 func writeSeeds(n *node.Node, seeds string) {
 	if seeds == "" {
@@ -278,7 +318,7 @@ func writeSeeds(n *node.Node, seeds string) {
 }
 
 // joinNetwork configures one data directory for an existing network.
-func joinNetwork(data string, pass []byte, keysFile string, seeds []string, propose bool, bind string, stdout, stderr *os.File) int {
+func joinNetwork(data string, pass []byte, keysFile, netFile string, seeds []string, propose bool, bind string, stdout, stderr *os.File) int {
 	if keysFile == "" {
 		fmt.Fprintln(stderr, "init-network: -proposer-keys is required with -data")
 		return 2
@@ -306,6 +346,22 @@ func joinNetwork(data string, pass []byte, keysFile string, seeds []string, prop
 		return 1
 	}
 	defer lock.Close()
+	if netFile != "" {
+		rawNet, err := os.ReadFile(netFile)
+		if err != nil {
+			fmt.Fprintln(stderr, "init-network:", err)
+			return 1
+		}
+		cfg, err := node.ParseNetworkConfig(string(rawNet))
+		if err != nil {
+			fmt.Fprintln(stderr, "init-network:", err)
+			return 1
+		}
+		if err := node.WriteNetworkConfig(data, cfg); err != nil {
+			fmt.Fprintln(stderr, "init-network:", err)
+			return 1
+		}
+	}
 	n, err := node.NewWithConfig(data, node.Config{WalletPassphrase: pass})
 	if err != nil {
 		fmt.Fprintln(stderr, "init-network:", err)

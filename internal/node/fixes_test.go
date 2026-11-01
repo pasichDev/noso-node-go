@@ -102,7 +102,7 @@ func TestFinal_PoolIsBounded(t *testing.T) {
 	for i := 0; i < MaxPoolLines+5; i++ {
 		o := types.Order{OrderLines: 1, OrderType: "TRFR", TimeStamp: ts + int64(i%50), Reference: "n" + strconv.Itoa(i), TrxLine: 1,
 			Sender: w.PublicKey, Address: w.Hash, Receiver: dest.Hash, AmmountFee: 1, AmmountTrf: 11}
-		SignOrder(&o, w.PrivateKey)
+		SignOrder(crypto.ChainID, &o, w.PrivateKey)
 		o.OrderID = SingleOrderID(o.TrfrID)
 		o.Normalize()
 		if i == 0 {
@@ -147,7 +147,7 @@ func TestFinal_OrderLinesCannotSwallowOthers(t *testing.T) {
 	mk := func(x types.Wallet, ts int64, lines int32, to string) types.Order {
 		o := types.Order{OrderLines: lines, OrderType: "TRFR", TimeStamp: ts, Reference: "null", TrxLine: 1,
 			Sender: x.PublicKey, Address: x.Hash, Receiver: to, AmmountFee: 1000000, AmmountTrf: 5}
-		SignOrder(&o, x.PrivateKey) // the attacker signs the count it declares
+		SignOrder(crypto.ChainID, &o, x.PrivateKey) // the attacker signs the count it declares
 		o.OrderID = crypto.GetOrderHash("1" + strconv.FormatInt(ts, 10) + o.TrfrID)
 		o.Normalize()
 		return o
@@ -210,8 +210,8 @@ func TestFinal_PrefixOfMultiLineOrderRefused(t *testing.T) {
 		Sender: w.PublicKey, Address: w.Hash, Receiver: r.Hash, AmmountFee: 10, AmmountTrf: 100}
 	l2 := l1
 	l2.TrxLine, l2.Sender, l2.Address = 2, s2.PublicKey, s2.Hash
-	SignOrder(&l1, w.PrivateKey)
-	SignOrder(&l2, s2.PrivateKey)
+	SignOrder(crypto.ChainID, &l1, w.PrivateKey)
+	SignOrder(crypto.ChainID, &l2, s2.PrivateKey)
 	// The proposer keeps line 1 and relabels the fields the old signature left out.
 	cut := l1
 	cut.OrderLines, cut.OrderID = 1, SingleOrderID(l1.TrfrID)
@@ -399,7 +399,7 @@ func TestFinal_SendGVTReferenceIsCanonical(t *testing.T) {
 	mk := func(ref string) types.Order {
 		o := types.Order{OrderLines: 1, OrderType: "SNDGVT", TimeStamp: *b.now - 100, Reference: ref, TrxLine: 1,
 			Sender: w.PublicKey, Address: w.Hash, Receiver: dest.Hash, AmmountFee: consensus.GetCustFee(a.MyLastBlock() + 1)}
-		SignOrder(&o, w.PrivateKey)
+		SignOrder(crypto.ChainID, &o, w.PrivateKey)
 		o.OrderID = SingleOrderID(o.TrfrID)
 		o.Normalize()
 		return o

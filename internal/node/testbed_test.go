@@ -168,7 +168,7 @@ func offer(n *Node, blk *storage.Block) (int, error) {
 func signedOrder(t *testing.T, w types.Wallet, typ, receiver, ref string, amount, fee, ts int64) (types.Order, string) {
 	o := types.Order{OrderLines: 1, OrderType: typ, TimeStamp: ts, Reference: ref, TrxLine: 1,
 		Sender: w.PublicKey, Address: w.Hash, Receiver: receiver, AmmountFee: fee, AmmountTrf: amount}
-	SignOrder(&o, w.PrivateKey)
+	SignOrder(crypto.ChainID, &o, w.PrivateKey)
 	o.OrderID = SingleOrderID(o.TrfrID)
 	o.Sender = o.Address
 	return o, w.PublicKey
@@ -183,7 +183,7 @@ func restamp(n *Node, blk *storage.Block) {
 	if num >= 53000 {
 		blk.Header.NxtBlkDiff = int32(len(blk.MNsAddrs))
 	}
-	blk.Header.Solution = solutionFor(strings.Repeat("0", 64), proposersDigest(n.Proposers()))
+	blk.Header.Solution = solutionFor(strings.Repeat("0", 64), n.chainDigest())
 	// The state root the block must carry: apply it to a scratch copy of the
 	// state and put the state back. A block that does not apply keeps the
 	// placeholder, which is refused for the real reason first.
@@ -193,7 +193,7 @@ func restamp(n *Node, blk *storage.Block) {
 		if moved, err := n.applyBlockState(blk); err == nil && n.Summary.UpdateChanges() == nil {
 			n.Summary.SetLastOp(num)
 			if n.persistDerived(num, moved) == nil {
-				blk.Header.Solution = solutionFor(n.stateRoot(), proposersDigest(n.Proposers()))
+				blk.Header.Solution = solutionFor(n.stateRoot(), n.chainDigest())
 			}
 		}
 		n.Summary.ResetBlockRecords()

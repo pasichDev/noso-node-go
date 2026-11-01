@@ -71,7 +71,8 @@ orders of input fail with "Wrong addresses count".
 ## Changes from the original (security fixes)
 
 * Signatures: `SignCanonical` / `VerifyCanonical` hash a length-prefixed
-  message (`"NOSO-SIG-v1"`, chain id, domain, fields) with SHA-256 and sign it
+  message (`"NOSO-SIG-v1"`, chain id, domain, fields; orders use the chain id of
+  their network file, everything else the default one) with SHA-256 and sign it
   with ECDSA on secp256k1. S is normalised to the low half and high-S
   signatures are rejected. The lenient Base64 decoding of messages, the SHA-1
   digest and the plain concatenated signed text of the original no longer

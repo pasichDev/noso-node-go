@@ -235,7 +235,7 @@ func (e *Engine) SendGVT(line string, say Printer) string {
 	// zero-padded "05", which the builder refuses.
 	o := types.Order{OrderLines: 1, OrderType: "SNDGVT", TimeStamp: ts, Reference: codec.IntToStr(int64(num)), TrxLine: 1,
 		Sender: w.PublicKey, Address: w.Hash, Receiver: dest, AmmountFee: fee}
-	node.SignOrder(&o, w.PrivateKey)
+	node.SignOrder(n.ChainID(), &o, w.PrivateKey)
 	o.OrderID = node.SingleOrderID(o.TrfrID)
 	o.Normalize()
 	return e.admitSingle(say, "SNDGVT", o, n.PTCSendGVT, func() string {
@@ -311,7 +311,7 @@ func (e *Engine) Customize(line string, say Printer) bool {
 	ts, _ := codec.StrToInt64(n.UTCTimeStr())
 	o := types.Order{OrderLines: 1, OrderType: "CUSTOM", TimeStamp: ts, Reference: "null", TrxLine: 1,
 		Sender: w.PublicKey, Address: w.Hash, Receiver: alias, AmmountFee: fee}
-	node.SignOrder(&o, w.PrivateKey)
+	node.SignOrder(n.ChainID(), &o, w.PrivateKey)
 	o.OrderID = node.SingleOrderID(o.TrfrID)
 	o.Normalize()
 	return e.admitSingle(say, "CUSTOM", o, n.PTCCustom, func() string { return "Customization sent" }) != ""
