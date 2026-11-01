@@ -29,7 +29,7 @@ type MNFile struct {
 func OpenMNFile(path string) *MNFile {
 	m := &MNFile{path: path}
 	if !Exists(path) {
-		_ = os.WriteFile(path, nil, 0o644)
+		_ = writeFileAtomic(path, nil)
 	}
 	m.Load()
 	return m

@@ -31,7 +31,14 @@
 
 ## Base64
 
-Keys and signatures are standard Base64 with padding. They are decoded the
+Verification (`VerifyCanonical`) accepts only canonical Base64 for the public
+key and the signature, and only the canonical low-S DER of the signature
+(`DecodeBase64Strict`; the bytes must re-encode to exactly the text). A second
+spelling of a signature would change the hash of the object that carries it
+(a sealed block) without a key. The rest of this section describes the legacy
+decoder, `DecodeBase64Lenient`, kept for reading Pascal-era private-key text.
+
+Keys and signatures are standard Base64 with padding. The legacy decoder works the
 way FPC's `DecodeStringBase64` does in its default MIME mode (`crypto/b64.go`
 follows `base64.pp`): the text is padded with `=` to a multiple of 4, the
 output size counts alphabet characters up to the first `=`, characters outside

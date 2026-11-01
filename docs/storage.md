@@ -105,10 +105,32 @@ MNSign, MNAutoIp, RPCPort, RPCPass, RPCFilter, RPCWhiteList, RPCAuto,
 RPCSaveNew, RPCBanned, MaxPeers, PosWarning. Lines starting with `//` and
 `---` are comments. Booleans are `True`/`False`.
 
-## Atomicity
+## Atomicity, locking, permissions
 
-Files are written to a temporary name and renamed (the Pascal code rewrites
-in place). The resulting bytes are identical.
+* `WriteFileAtomic` (temporary file, fsync, rename, directory fsync, mode
+  0600) is used for every state file, including `advopt.txt`; a failed rename
+  removes the temporary file. The resulting bytes are identical to the Pascal
+  files. Appends to `blchhead.nos` and `blocks_db.nos` are written at the
+  record boundary and synced, so a torn tail is overwritten (and cut when
+  `blocks_db.nos` is opened). `.bak` copies are atomic too.
+* `LockDataDir(root)` takes an exclusive flock (Windows: LockFileEx) on
+  `root/.lock` and returns `ErrDataDirLocked` to a second holder. Every writer
+  holds it for its whole life (nosod, the GUI, and nosocli when it opens the
+  directory itself). After locking it runs `RecoverDataDir`: finishes or
+  discards an interrupted `Txn` and removes `*.tmp` / `*.new` debris
+  (wallet temporaries are overwritten first).
+* `Txn` (`NewTxn(root)`, `Add(path, data)`, `Commit()`) replaces several whole
+  files atomically: files are staged as `<path>.new`, a checksummed manifest
+  `commit.journal` is written atomically (the commit point), the files are
+  renamed, the manifest removed. A crash leaves all old or all new files.
+  Whole-file only; one transaction at a time; `ErrTxnPending` means the
+  journal is durable and restart completes it. Intended for the block file +
+  headers + small state files; the in-place summary is not covered.
+* The data directory is created and kept 0700, wallet files and `advopt.txt`
+  0600 (existing 0644 files are tightened when opened or saved). Windows: modes
+  and `os.Chmod` do nothing there. The directory inherits the ACL of its parent;
+  keep it under the user's profile or run `icacls <dir> /inheritance:r /grant:r
+  "%USERNAME%:(OI)(CI)F"`. No DACL is set by the node.
 
 ## Differences (security fixes)
 

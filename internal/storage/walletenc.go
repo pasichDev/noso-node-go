@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -93,25 +94,49 @@ func openWallet(raw, pass []byte) ([]byte, error) {
 // disk.
 type WalletOpenOptions struct {
 	// ReadOnly opens without writing anything: no migration, no new wallet,
-	// no Save. A status style command uses it. A wallet.pkw is then read in
-	// memory only.
+	// no Save, no merge. A status style command uses it (nosocli status must
+	// set it). Everything a writable open would restore or merge is still
+	// shown, in memory only.
 	ReadOnly bool
 }
 
+// MinPassphrase is the shortest passphrase accepted for a NEW encrypted
+// wallet (an existing wallet.enc opens with whatever opens it).
+const MinPassphrase = 8
+
+// CheckNewPassphrase refuses a short passphrase when opening dataDir would
+// create or migrate into a new wallet.enc. It is the one rule shared by every
+// front end: nosod, the GUI and nosocli all call it before OpenWalletFor.
+func CheckNewPassphrase(dataDir string, pass []byte) error {
+	if len(pass) == 0 || len(pass) >= MinPassphrase {
+		return nil
+	}
+	if Exists(filepath.Join(dataDir, "wallet.enc")) || Exists(filepath.Join(dataDir, "wallet.enc.bak")) {
+		return nil
+	}
+	return fmt.Errorf("the wallet passphrase must have at least %d characters", MinPassphrase)
+}
+
 // OpenWalletEncrypted opens (or creates) the encrypted wallet next to
-// plainPath, writing what it must:
+// plainPath, writing what it must. The sources are wallet.enc, wallet.enc.bak
+// and the legacy wallet.pkw / wallet.pkw.bak; no source is ever erased or
+// overwritten by data that lacks its keys:
 //
-//   - wallet.enc exists: it is decrypted; nothing else is touched.
-//   - only a legacy wallet.pkw exists: it is migrated, never destroyed.
-//     The plain records are sealed byte for byte, the file is read back from
-//     disk, decrypted and compared with the original, and every key pair is
-//     checked (sign and verify, address). wallet.pkw and its .bak stay where
-//     they are. A mistyped passphrase therefore costs nothing: remove the
-//     new wallet.enc and migrate again. RetireLegacyWallet removes the plain
-//     copy, on explicit request only.
-//   - neither exists but wallet.enc.bak does: the backup is restored if the
-//     passphrase opens it, otherwise an error (a new wallet would overwrite
-//     the backup).
+//   - wallet.enc opens: it is the wallet. Keys that only the .bak files hold
+//     are added (and saved) with a warning. If wallet.enc does not open but
+//     wallet.enc.bak does with this passphrase, wallet.enc is damaged: it is
+//     kept as wallet.enc.damaged-<time> and restored from the backup.
+//   - wallet.enc is missing: the wallet is the union of wallet.enc.bak (the
+//     newest sealed copy) and the verified legacy files, in that order, so a
+//     kept wallet.pkw never hides a newer backup. The plain records are sealed
+//     byte for byte, the file is read back from disk, decrypted and compared,
+//     and every key pair is checked (sign and verify, address). The legacy
+//     files stay where they are. A mistyped passphrase therefore costs
+//     nothing: move the new wallet.enc away and open again; a backup that
+//     does not open is kept under another name by the next save.
+//     RetireLegacyWallet removes the plain copies, on explicit request only.
+//   - only an unreadable wallet.enc.bak exists: an error (a new wallet would
+//     overwrite the backup).
 //   - nothing exists: a new wallet with one fresh address.
 func OpenWalletEncrypted(plainPath string, pass []byte) (*Wallet, error) {
 	return OpenWalletEncryptedOpts(plainPath, pass, WalletOpenOptions{})
@@ -123,94 +148,165 @@ func OpenWalletEncryptedOpts(plainPath string, pass []byte, o WalletOpenOptions)
 		return nil, errors.New("wallet: empty passphrase")
 	}
 	encPath := filepath.Join(filepath.Dir(plainPath), "wallet.enc")
-	w := &Wallet{path: encPath, pass: append([]byte(nil), pass...), readOnly: o.ReadOnly}
+	w := &Wallet{path: encPath, pass: append([]byte(nil), pass...), readOnly: o.ReadOnly, plainPath: plainPath}
+	bakW := &Wallet{path: encPath + ".bak", pass: w.pass}
+	bakOK := Exists(bakW.path) && bakW.LoadErr() == nil
 	switch {
 	case Exists(encPath):
-		if !w.Load() {
-			if Exists(plainPath) {
-				return nil, fmt.Errorf("%w (wallet.pkw is still present and untouched; if wallet.enc came from a migration with a mistyped passphrase, move it away and start again)", ErrWalletPassphrase)
+		if err := w.LoadErr(); err != nil {
+			if !bakOK {
+				if Exists(plainPath) {
+					return nil, fmt.Errorf("%w (wallet.pkw is still present and untouched; if wallet.enc came from a migration with a mistyped passphrase, move it away and start again)", ErrWalletPassphrase)
+				}
+				return nil, ErrWalletPassphrase
 			}
-			return nil, ErrWalletPassphrase
+			// the backup opens with this passphrase, so wallet.enc is damaged
+			w.arr = nil
+			w.mergeRecords(bakW.All())
+			w.warn("wallet.enc is damaged; restored from wallet.enc.bak")
+			if !o.ReadOnly {
+				if err := preserveDamaged(encPath); err != nil {
+					return nil, err
+				}
+				if err := w.SaveErr(); err != nil {
+					return nil, err
+				}
+			}
 		}
-	case Exists(plainPath):
-		if o.ReadOnly {
-			legacy, _ := OpenWallet(plainPath)
-			legacy.readOnly = true
-			return legacy, nil
-		}
-		if err := migrateLegacy(w, plainPath); err != nil {
-			return nil, err
-		}
-	case Exists(encPath + ".bak"):
-		bak := &Wallet{path: encPath + ".bak", pass: w.pass}
-		if !bak.Load() {
-			return nil, fmt.Errorf("%w (wallet.enc is missing and wallet.enc.bak does not open; not creating a new wallet over it)", ErrWalletPassphrase)
-		}
-		if o.ReadOnly {
-			bak.readOnly = true
-			return bak, nil
-		}
-		for _, r := range bak.All() {
-			w.Insert(r)
-		}
-		if err := w.SaveErr(); err != nil {
+		if err := w.mergeExtras(plainPath, bakW, bakOK, o.ReadOnly); err != nil {
 			return nil, err
 		}
 	default:
-		if o.ReadOnly {
+		hasPlain := Exists(plainPath) || Exists(plainPath+".bak")
+		switch {
+		case bakOK || hasPlain:
+			if err := w.restoreOrMigrate(plainPath, bakW, bakOK, o.ReadOnly); err != nil {
+				return nil, err
+			}
+		case Exists(bakW.path):
+			return nil, fmt.Errorf("%w (wallet.enc is missing and wallet.enc.bak does not open; not creating a new wallet over it)", ErrWalletPassphrase)
+		case o.ReadOnly:
 			return w, nil
+		default:
+			if _, err := w.NewAddress(); err != nil {
+				return nil, fmt.Errorf("wallet: cannot write the encrypted wallet: %w", err)
+			}
 		}
-		if _, err := w.NewAddress(); err != nil {
-			return nil, errors.New("wallet: cannot write the encrypted wallet")
+	}
+	w.legacyKept = ""
+	for _, p := range []string{plainPath, plainPath + ".bak"} {
+		if Exists(p) {
+			w.legacyKept = plainPath
 		}
 	}
 	if !o.ReadOnly {
-		_ = os.Chmod(encPath, 0o600)
+		tightenFiles(encPath, encPath+".bak", plainPath, plainPath+".bak")
 	}
 	return w, nil
 }
 
-// OpenWalletFor chooses the wallet the way the front ends must: with
-// insecurePlain the clear-text wallet.pkw is used as it is (the passphrase is
-// ignored, nothing is migrated), and it is refused when a wallet.enc exists
-// so a second, empty wallet is never started silently. Otherwise the
-// encrypted wallet needs a passphrase.
-func OpenWalletFor(plainPath string, pass []byte, insecurePlain bool, o WalletOpenOptions) (*Wallet, error) {
-	if insecurePlain {
-		if Exists(filepath.Join(filepath.Dir(plainPath), "wallet.enc")) {
-			return nil, errors.New("wallet: wallet.enc exists; refusing -insecure-plain-wallet (it would start a different, empty wallet)")
+// legacySource reads a clear-text legacy wallet file for merging or
+// migration: the whole records of it, only when every key pair checks out.
+//
+// warn is a note about a file that is merely unusable (unreadable, no
+// records); bad is set when the file holds a record whose keys do not check
+// out: migration must stop then, merging into an existing wallet just skips it.
+func legacySource(path string) (raw []byte, warn string, bad bool) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, "", false
 		}
-		if o.ReadOnly {
-			if !Exists(plainPath) {
-				return &Wallet{path: plainPath, readOnly: true}, nil
-			}
-			w, _ := OpenWallet(plainPath)
-			w.readOnly = true
-			return w, nil
-		}
-		w, _ := OpenWallet(plainPath)
-		return w, nil
+		return nil, fmt.Sprintf("%s cannot be read: %v", filepath.Base(path), err), false
 	}
-	return OpenWalletEncryptedOpts(plainPath, pass, o)
+	n := len(b) / types.WalletSize
+	if n == 0 {
+		return nil, fmt.Sprintf("%s holds no complete record", filepath.Base(path)), false
+	}
+	rec := b[:n*types.WalletSize]
+	if err := verifyKeys(rec); err != nil {
+		return nil, fmt.Sprintf("%s ignored: %v", filepath.Base(path), err), true
+	}
+	return rec, "", false
 }
 
-// LegacyKept returns the path of a wallet.pkw that was migrated and is still
-// on disk ("" otherwise): the front end should tell the user.
-func (w *Wallet) LegacyKept() string { return w.legacyKept }
-
-// migrateLegacy seals plainPath into w.path without removing anything.
-func migrateLegacy(w *Wallet, plainPath string) error {
-	raw, err := os.ReadFile(plainPath)
-	if err != nil {
-		return err
+// mergeExtras adds keys that wallet.enc lacks but wallet.enc.bak or the
+// verified legacy files hold, and saves them.
+func (w *Wallet) mergeExtras(plainPath string, bakW *Wallet, bakOK, readOnly bool) error {
+	n := 0
+	if bakOK {
+		n += w.mergeRecords(bakW.All())
 	}
-	n := len(raw) / types.WalletSize
+	for _, p := range []string{plainPath, plainPath + ".bak"} {
+		raw, warn, _ := legacySource(p)
+		if warn != "" {
+			w.warn(warn)
+		}
+		recs, _ := splitRecords(raw)
+		n += w.mergeRecords(recs)
+	}
 	if n == 0 {
-		return errors.New("wallet: legacy wallet.pkw holds no addresses")
+		return nil
 	}
-	records := raw[:n*types.WalletSize]
-	if err := verifyKeys(records); err != nil {
-		return fmt.Errorf("wallet: legacy wallet.pkw not migrated, wallet.pkw kept: %w", err)
+	w.warn(fmt.Sprintf("%d key(s) that wallet.enc lacked were recovered from the backup files", n))
+	if readOnly {
+		return nil
+	}
+	return w.SaveErr()
+}
+
+// restoreOrMigrate builds the wallet from the sources when wallet.enc is
+// missing (see OpenWalletEncrypted).
+func (w *Wallet) restoreOrMigrate(plainPath string, bakW *Wallet, bakOK, readOnly bool) error {
+	var records []byte // byte exact for the first source, then only new addresses
+	have := map[string]bool{}
+	add := func(raw []byte) {
+		recs, _ := splitRecords(raw)
+		if len(records) == 0 {
+			records = append(records, raw...)
+			for _, r := range recs {
+				have[r.Hash] = true
+			}
+			return
+		}
+		for _, r := range recs {
+			if !have[r.Hash] {
+				have[r.Hash] = true
+				records = append(records, r.Encode()...)
+			}
+		}
+	}
+	if bakOK {
+		var b []byte
+		for _, r := range bakW.All() {
+			b = append(b, r.Encode()...)
+		}
+		add(b)
+	}
+	legacyErr := ""
+	for _, p := range []string{plainPath, plainPath + ".bak"} {
+		raw, warn, bad := legacySource(p)
+		if bad {
+			return fmt.Errorf("wallet: legacy wallet.pkw not migrated, wallet files kept: %s", warn)
+		}
+		if warn != "" {
+			w.warn(warn)
+			legacyErr = warn
+		}
+		if raw != nil {
+			add(raw)
+		}
+	}
+	if len(records) == 0 {
+		if Exists(plainPath) {
+			return fmt.Errorf("wallet: legacy wallet.pkw not migrated, wallet.pkw kept: %s", legacyErr)
+		}
+		return errors.New("wallet: no usable wallet source")
+	}
+	if readOnly {
+		recs, _ := splitRecords(records)
+		w.mergeRecords(recs)
+		return nil
 	}
 	sealed, err := sealWallet(records, w.pass)
 	if err != nil {
@@ -227,13 +323,64 @@ func migrateLegacy(w *Wallet, plainPath string) error {
 	}
 	if err != nil || !bytes.Equal(back, records) || verifyKeys(back) != nil {
 		_ = os.Remove(w.path) // our own file, never the original
-		return errors.New("wallet: migration check failed; wallet.pkw kept")
+		return errors.New("wallet: migration check failed; the old wallet files were kept")
 	}
 	if !w.Load() || w.Len() == 0 {
 		_ = os.Remove(w.path)
-		return errors.New("wallet: migration check failed; wallet.pkw kept")
+		return errors.New("wallet: migration check failed; the old wallet files were kept")
 	}
-	w.legacyKept = plainPath
+	if bakOK {
+		w.warn("wallet.enc was missing; restored from wallet.enc.bak and the legacy files")
+	}
+	return nil
+}
+
+// OpenWalletFor chooses the wallet the way the front ends must: with
+// insecurePlain the clear-text wallet.pkw is used as it is (the passphrase is
+// ignored, nothing is migrated), and it is refused when a wallet.enc or a
+// wallet.enc.bak exists so a second, empty wallet is never started silently.
+// Otherwise the encrypted wallet needs a passphrase.
+func OpenWalletFor(plainPath string, pass []byte, insecurePlain bool, o WalletOpenOptions) (*Wallet, error) {
+	if insecurePlain {
+		dir := filepath.Dir(plainPath)
+		for _, n := range []string{"wallet.enc", "wallet.enc.bak"} {
+			if Exists(filepath.Join(dir, n)) {
+				return nil, fmt.Errorf("wallet: %s exists; refusing -insecure-plain-wallet (it would start a different, empty wallet)", n)
+			}
+		}
+		return openWalletPlain(plainPath, o.ReadOnly)
+	}
+	return OpenWalletEncryptedOpts(plainPath, pass, o)
+}
+
+// LegacyKept returns the path of a wallet.pkw (or its .bak) that is still on
+// disk next to wallet.enc, "" otherwise. Clear-text keys stay readable there
+// until RetireLegacy runs.
+func (w *Wallet) LegacyKept() string { return w.legacyKept }
+
+// LegacyWarning is the text a front end prints at every start while clear-text
+// legacy wallet files remain ("" when none): see RetireLegacy.
+func (w *Wallet) LegacyWarning() string {
+	if w.legacyKept == "" {
+		return ""
+	}
+	return "WARNING: " + w.legacyKept + " (and its .bak) still hold your private keys in clear text. " +
+		"Once wallet.enc is verified, remove them with: nosocli wallet retire-legacy"
+}
+
+// RetireLegacy is RetireLegacyWallet for this wallet's own files and
+// passphrase; the CLI command `wallet retire-legacy` calls it.
+func (w *Wallet) RetireLegacy() error {
+	if w.readOnly {
+		return ErrWalletReadOnly
+	}
+	if w.plainPath == "" || len(w.pass) == 0 {
+		return errors.New("wallet: not an encrypted wallet")
+	}
+	if err := RetireLegacyWallet(w.plainPath, w.pass); err != nil {
+		return err
+	}
+	w.legacyKept = ""
 	return nil
 }
 
@@ -257,17 +404,16 @@ func verifyKeys(records []byte) error {
 	return nil
 }
 
-// RetireLegacyWallet removes the clear-text wallet.pkw (and .bak) after the
-// caller explicitly asked for it. It first decrypts wallet.enc with pass and
-// checks that every record of wallet.pkw is byte-identical in it; anything
-// else leaves all files in place and returns an error. Nothing calls this
-// automatically.
+// RetireLegacyWallet removes the clear-text wallet.pkw, wallet.pkw.bak and
+// wallet.pkw.tmp after the caller explicitly asked for it. It first decrypts
+// wallet.enc with pass and checks that every record of every one of those
+// files is in it with the same private key; if any file holds a key that
+// wallet.enc lacks, everything stays and an error names the file. Files are
+// overwritten with zeros, synced and removed; a file that could not be
+// overwritten or removed is reported and left in place. Nothing calls this
+// automatically (Wallet.RetireLegacy is the CLI entry point).
 func RetireLegacyWallet(plainPath string, pass []byte) error {
 	encPath := filepath.Join(filepath.Dir(plainPath), "wallet.enc")
-	plain, err := os.ReadFile(plainPath)
-	if err != nil {
-		return err
-	}
 	disk, err := os.ReadFile(encPath)
 	if err != nil {
 		return err
@@ -276,41 +422,68 @@ func RetireLegacyWallet(plainPath string, pass []byte) error {
 	if err != nil {
 		return err
 	}
-	n := len(plain) / types.WalletSize
-	if n == 0 {
-		return errors.New("wallet: wallet.pkw holds no records; nothing removed")
+	if err := verifyKeys(back); err != nil {
+		return err
 	}
 	inEnc := map[string]string{}
 	for i := 0; i+types.WalletSize <= len(back); i += types.WalletSize {
 		r := types.DecodeWallet(back[i:])
 		inEnc[r.Hash] = r.PrivateKey
 	}
-	for i := 0; i < n; i++ {
-		r := types.DecodeWallet(plain[i*types.WalletSize:])
-		if k, ok := inEnc[r.Hash]; !ok || k != r.PrivateKey {
-			return errors.New("wallet: wallet.enc does not hold every key of wallet.pkw; nothing removed")
+	var targets []string
+	for _, p := range []string{plainPath, plainPath + ".bak", plainPath + ".tmp"} {
+		raw, err := os.ReadFile(p)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if p == plainPath && len(raw)/types.WalletSize == 0 {
+			return errors.New("wallet: wallet.pkw holds no records; nothing removed")
+		}
+		recs, _ := splitRecords(raw)
+		for _, r := range recs {
+			if k, ok := inEnc[r.Hash]; !ok || k != r.PrivateKey {
+				return fmt.Errorf("wallet: %s holds a key (%s) that wallet.enc does not; nothing removed", filepath.Base(p), r.Hash)
+			}
+		}
+		targets = append(targets, p)
+	}
+	if len(targets) == 0 {
+		return errors.New("wallet: no legacy wallet files to remove")
+	}
+	var errs []error
+	for _, p := range targets {
+		if err := shred(p); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", filepath.Base(p), err))
 		}
 	}
-	if err := verifyKeys(back); err != nil {
-		return err
-	}
-	for _, p := range []string{plainPath, plainPath + ".bak"} {
-		shred(p)
-	}
-	return nil
+	return errors.Join(errs...)
 }
 
-// shred overwrites a file with zeros and removes it (best effort; flash
-// storage and journals may keep copies, see docs/compatibility.md).
-func shred(path string) {
+// shred overwrites a file with zeros, syncs and removes it (best effort on
+// flash storage and journalled filesystems, see docs/compatibility.md). It
+// reports a failure at any step and removes the file only after a successful
+// overwrite.
+func shred(path string) error {
 	st, err := os.Stat(path)
 	if err != nil {
-		return
+		return err
 	}
-	if f, err := os.OpenFile(path, os.O_WRONLY, 0); err == nil {
-		_, _ = f.Write(make([]byte, st.Size()))
-		_ = f.Sync()
-		_ = f.Close()
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		return err
 	}
-	_ = os.Remove(path)
+	_, werr := f.Write(make([]byte, st.Size()))
+	if serr := f.Sync(); werr == nil {
+		werr = serr
+	}
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		return werr
+	}
+	return os.Remove(path)
 }

@@ -22,8 +22,9 @@ type BlocksDB struct {
 func OpenBlocksDB(path string) *BlocksDB {
 	d := &BlocksDB{path: path, index: map[int32][]int32{}}
 	if !Exists(path) {
-		_ = os.WriteFile(path, nil, 0o644)
+		_ = writeFileAtomic(path, nil)
 	}
+	d.dropTornTail()
 	d.LoadIndex()
 	return d
 }
@@ -38,6 +39,16 @@ func DBIndex(text string) int32 {
 	sub := codec.Copy(t, 2, 6)
 	v, _ := codec.StrToInt64(crypto.B58ToB10(sub))
 	return int32(v % 100000)
+}
+
+// dropTornTail truncates a partial last record (crash during an append).
+// Records are fixed-size, so a stray tail would misalign every later record
+// (re2 #10). Headers.Add handles the same case by writing at the record
+// boundary.
+func (d *BlocksDB) dropTornTail() {
+	if st, err := os.Stat(d.path); err == nil && st.Size()%types.DBRecSize != 0 {
+		_ = os.Truncate(d.path, st.Size()/types.DBRecSize*types.DBRecSize)
+	}
 }
 
 // LoadIndex mirrors CreateOrderIDIndex.
@@ -55,18 +66,56 @@ func (d *BlocksDB) LoadIndex() {
 	}
 }
 
-// Add mirrors AddRecordToDBFile.
+// Add mirrors AddRecordToDBFile. The record is written at the record boundary
+// (over a torn tail) and synced; the index is updated only if the write
+// succeeded.
 func (d *BlocksDB) Add(block, order, source, target int32) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	f, err := os.OpenFile(d.path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o644)
+	f, err := os.OpenFile(d.path, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return false
 	}
 	defer f.Close()
-	_, err = f.Write(types.DBRecord{Block: block, OrderID: order, Source: source, Target: target}.Encode())
+	st, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	off := st.Size() / types.DBRecSize * types.DBRecSize
+	if _, err = f.WriteAt(types.DBRecord{Block: block, OrderID: order, Source: source, Target: target}.Encode(), off); err != nil {
+		return false
+	}
+	if err = f.Sync(); err != nil {
+		return false
+	}
 	d.index[order] = append(d.index[order], block)
-	return err == nil
+	return true
+}
+
+// RollbackTo drops every record of a block above block and rebuilds the index.
+// A reorganisation must call it with the new tip's parent before the
+// replacement blocks are indexed; Update only ever indexes upwards, so stale
+// records of the abandoned branch would stay (re2 #10).
+func (d *BlocksDB) RollbackTo(block int32) error {
+	d.mu.Lock()
+	raw, err := os.ReadFile(d.path)
+	if err != nil {
+		d.mu.Unlock()
+		return err
+	}
+	keep := 0
+	for i := 0; i+types.DBRecSize <= len(raw); i += types.DBRecSize {
+		if types.DecodeDBRecord(raw[i:]).Block > block {
+			break
+		}
+		keep = i + types.DBRecSize
+	}
+	if keep < len(raw) {
+		err = writeFileAtomic(d.path, raw[:keep])
+	}
+	d.mu.Unlock()
+	d.LoadIndex()
+	return err
 }
 
 // LastBlock mirrors GetDBLastBlock (0 for an empty file).

@@ -23,7 +23,7 @@ type Headers struct {
 func OpenHeaders(path string) *Headers {
 	h := &Headers{path: path}
 	if !Exists(path) {
-		_ = os.WriteFile(path, nil, 0o644)
+		_ = writeFileAtomic(path, nil)
 	}
 	h.hash = crypto.IDHashFile(path)
 	return h
@@ -50,14 +50,14 @@ func (h *Headers) Hash() string {
 func (h *Headers) Create() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return os.WriteFile(h.path, nil, 0o644) == nil
+	return writeFileAtomic(h.path, nil) == nil
 }
 
 // Add appends a record (AddRecordToHeaders).
 func (h *Headers) Add(block int64, blockHash, sumHash string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	f, err := os.OpenFile(h.path, os.O_RDWR, 0o644)
+	f, err := os.OpenFile(h.path, os.O_RDWR, 0o600)
 	if err != nil {
 		return false
 	}
@@ -70,8 +70,10 @@ func (h *Headers) Add(block int64, blockHash, sumHash string) bool {
 	// record the new one is written at the record boundary, over the partial.
 	off := st.Size() / types.ResumenSize * types.ResumenSize
 	// COMPAT: BlockNumber is Int64 but the record field is a 32-bit integer.
-	_, err = f.WriteAt(types.Resumen{Block: int32(block), BlockHash: blockHash, SumHash: sumHash}.Encode(), off)
-	return err == nil
+	if _, err = f.WriteAt(types.Resumen{Block: int32(block), BlockHash: blockHash, SumHash: sumHash}.Encode(), off); err != nil {
+		return false
+	}
+	return f.Sync() == nil // durable before the caller moves on (re2 #7)
 }
 
 // RemoveLast drops the final record (RemoveHeadersLastRecord).
@@ -86,7 +88,15 @@ func (h *Headers) RemoveLast() bool {
 	if n == 0 {
 		return false // seek(-1) raises in Pascal
 	}
-	return os.Truncate(h.path, (n-1)*types.ResumenSize) == nil
+	if os.Truncate(h.path, (n-1)*types.ResumenSize) != nil {
+		return false
+	}
+	f, err := os.OpenFile(h.path, os.O_RDWR, 0)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	return f.Sync() == nil
 }
 
 // Height mirrors GetHeadersHeigth: record count minus one, -1 on error.

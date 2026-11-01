@@ -28,7 +28,7 @@ type GVTs struct {
 func OpenGVTs(path string) *GVTs {
 	g := &GVTs{path: path}
 	if !Exists(path) {
-		_ = os.WriteFile(path, nil, 0o644)
+		_ = writeFileAtomic(path, nil)
 	}
 	g.Reload()
 	return g
@@ -51,16 +51,18 @@ func (g *GVTs) Reload() {
 	g.hash = crypto.IDHashFile(g.path)
 }
 
-// Save mirrors SaveGVTs.
-func (g *GVTs) Save() {
+// Save mirrors SaveGVTs. The error is not optional to look at: a failed write
+// leaves the file (and Hash) out of step with the in-memory records.
+func (g *GVTs) Save() error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	var out []byte
 	for _, r := range g.arr {
 		out = append(out, r.Encode()...)
 	}
-	_ = writeFileAtomic(g.path, out)
+	err := writeFileAtomic(g.path, out)
 	g.hash = crypto.IDHashFile(g.path)
+	return err
 }
 
 // Hash returns MyGVTsHash.
@@ -166,18 +168,17 @@ func GVTPrice(available int, toSell bool) int64 {
 }
 
 // Backup / RestoreBackup mirror the .bak handling of BuildNewBlock and
-// UndoneLastBlock.
+// UndoneLastBlock. Both copy atomically: a missing gvts.psk does not delete the
+// good .bak, and a missing .bak does not delete gvts.psk (re2 #7).
 func (g *GVTs) Backup() error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	_ = os.Remove(g.path + ".bak")
 	return copyFile(g.path, g.path+".bak")
 }
 
 // RestoreBackup copies gvts.psk.bak back and reloads.
 func (g *GVTs) RestoreBackup() error {
 	g.mu.Lock()
-	_ = os.Remove(g.path)
 	err := copyFile(g.path+".bak", g.path)
 	g.mu.Unlock()
 	g.Reload()

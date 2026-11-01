@@ -7,7 +7,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
+	"syscall"
 )
 
 // Layout holds every path of a node data directory (masterpaskalform.pas
@@ -66,14 +68,22 @@ func (l Layout) BlockFile(n int64) string {
 
 // EnsureDirs mirrors FileStructure (mpdisk.pas:66-85); it returns the
 // number of directories that could not be created.
+//
+// FIX(re2 #8): the data directory is created 0700 and an existing one is
+// tightened to 0700, because it holds the wallet and the RPC tokens. On
+// Windows neither the mode nor os.Chmod does anything: the directory inherits
+// the ACL of its parent, so put the data directory below the user's profile
+// (the default) or set the ACL by hand (icacls <dir> /inheritance:r /grant:r
+// "%USERNAME%:(OI)(CI)F"). The node does not set a DACL itself.
 func (l Layout) EnsureDirs() int {
 	failed := 0
 	for _, d := range []string{l.Root, l.LogsDir, l.BlockDir, l.UpdatesDir, l.MarksDir,
 		l.GVTMarksDir, l.RPCBakDir, l.DBDir} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
+		if err := os.MkdirAll(d, 0o700); err != nil {
 			failed++
 		}
 	}
+	_ = os.Chmod(l.Root, 0o700)
 	return failed
 }
 
@@ -100,15 +110,29 @@ func itoa(n int64) string {
 	return string(b[i:])
 }
 
-// writeFileAtomic writes data to path via a temporary file and rename so a
-// crash cannot leave a half written file (hardening; the resulting bytes
-// are identical to the Pascal SaveToFile).
+// WriteFileAtomic replaces path with data so that after a crash the file is
+// either the old content or the new content, never a mix, and the new content
+// is on stable storage when it returns nil: temporary file, fsync, rename,
+// fsync of the directory. The result has mode 0600 (an existing file's mode is
+// replaced, which also tightens a Pascal-era 0644 file). Every state file of
+// the node is written through this function; code outside the package must use
+// it too (node/chain.go snapshot).
+func WriteFileAtomic(path string, data []byte) error { return writeFileAtomic(path, data) }
+
+// atomicLocks serialises writers of one path inside the process: two writers
+// would share the same temporary file.
+var atomicLocks sync.Map
+
 func writeFileAtomic(path string, data []byte) error {
+	m, _ := atomicLocks.LoadOrStore(path, &sync.Mutex{})
+	m.(*sync.Mutex).Lock()
+	defer m.(*sync.Mutex).Unlock()
 	tmp := path + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
+	_ = f.Chmod(0o600) // a stale tmp may have been created with another mode
 	_, werr := f.Write(data)
 	if serr := f.Sync(); werr == nil { // FIX(M-12): flush before the rename
 		werr = serr
@@ -121,22 +145,42 @@ func writeFileAtomic(path string, data []byte) error {
 		return werr
 	}
 	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp) // FIX(re2 #14): in plain wallet mode this is a clear-text copy
 		return err
 	}
-	if d, err := os.Open(filepath.Dir(path)); err == nil {
-		_ = d.Sync()
-		_ = d.Close()
-	}
-	return nil
+	return syncDir(filepath.Dir(path))
 }
 
-// copyFile mirrors TryCopyFile.
+// syncDir flushes a directory entry change (rename, create, remove). Windows
+// cannot fsync a directory handle and persists the rename itself; filesystems
+// that reject directory fsync with EINVAL are tolerated.
+func syncDir(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	err = d.Sync()
+	if cerr := d.Close(); err == nil {
+		err = cerr
+	}
+	if errors.Is(err, syscall.EINVAL) {
+		return nil
+	}
+	return err
+}
+
+// copyFile mirrors TryCopyFile, atomically: the destination is replaced as a
+// whole (see WriteFileAtomic) and left untouched when the source cannot be
+// read. Used for every .bak copy.
 func copyFile(src, dst string) error {
 	b, err := os.ReadFile(src)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(dst, b, 0o600)
+	return writeFileAtomic(dst, b)
 }
 
 // Exists reports whether path exists.

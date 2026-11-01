@@ -89,7 +89,7 @@ func (s *SummaryDB) CreateIndex() {
 func (s *SummaryDB) CreateNew(addBlockZero bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_ = os.WriteFile(s.path, nil, 0o644)
+	_ = writeFileAtomic(s.path, nil)
 	s.rebuildIndexLocked()
 	// Hardening: Pascal keeps stale block records here, which would be
 	// written at slots beyond the new empty file.
@@ -404,7 +404,7 @@ func (s *SummaryDB) UpdateChanges() error {
 }
 
 func (s *SummaryDB) updateChangesLocked() error {
-	f, err := os.OpenFile(s.path, os.O_RDWR, 0o644)
+	f, err := os.OpenFile(s.path, os.O_RDWR, 0o600)
 	if err != nil {
 		return err // FIX(M-12): write failures are reported (nosounit.pas:549-553 ignored them)
 	}

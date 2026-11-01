@@ -43,6 +43,8 @@ type PSOs struct {
 	locks  []types.MNLock
 	psos   []PSO
 	hash   string
+	// saveErr is the result of the last write of the file.
+	saveErr error
 }
 
 // OpenPSOs mirrors LoadPSOFileFromDisk at startup.
@@ -132,13 +134,14 @@ func (p *PSOs) parse(raw []byte) bool {
 }
 
 // Save mirrors SavePSOFileToDisk (nosopsos.pas:205-240).
-func (p *PSOs) Save(block int) {
+func (p *PSOs) Save(block int) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.saveLocked(block)
+	return p.saveLocked(block)
 }
 
-func (p *PSOs) saveLocked(block int) {
+// saveLocked writes the file; the error of the last write is kept for SaveErr.
+func (p *PSOs) saveLocked(block int) error {
 	p.header.Block = int32(block)
 	p.header.Count = int32(len(p.psos))
 	p.header.MNsLock = int32(len(p.locks))
@@ -160,8 +163,19 @@ func (p *PSOs) saveLocked(block int) {
 		str(r.Members)
 		str(r.Params)
 	}
-	_ = writeFileAtomic(p.path, b.Bytes())
+	p.saveErr = writeFileAtomic(p.path, b.Bytes())
 	p.hash = crypto.IDHashFile(p.path)
+	return p.saveErr
+}
+
+// SaveErr returns the error of the most recent write of psos.dat (nil when it
+// succeeded). Methods that save as a side effect (AddLocked, AddNew, Load,
+// ClearExpired) keep their signatures; a caller that must not advance on a
+// failed write checks this afterwards (re2 #7).
+func (p *PSOs) SaveErr() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.saveErr
 }
 
 // FileHash returns PSOFileHash.

@@ -10,8 +10,11 @@ import (
 	"github.com/pasichDev/noso-node-go/internal/types"
 )
 
-// GOLDEN VECTORS, DERIVED. No file written by the Pascal node is available,
-// so each vector below is assembled by hand, byte offset by byte offset, from
+// GOLDEN VECTORS, DERIVED. Of the files in testdata/, 59238.psk and gvts.psk
+// are real files written by the Pascal node (byte-identical to the originals
+// in the NosoNode source tree, used in types_test.go). No block, wallet,
+// headers or psos file written by the Pascal node is available, so each
+// vector below is assembled by hand, byte offset by byte offset, from
 // the packed record declarations in the Pascal source (cited per test). The
 // builders use encoding/binary and explicit offsets, not the code under test.
 // They prove that the Go codec agrees with the layout as read from the

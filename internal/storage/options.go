@@ -3,6 +3,7 @@ package storage
 import (
 	"bufio"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 
@@ -12,6 +13,9 @@ import (
 // Options is the content of advopt.txt (mpdisk.pas:232-386) together with
 // the runtime defaults declared in masterpaskalform.pas:621-650.
 type Options struct {
+	// partial is set when the last Load stopped before the end of the file:
+	// Save then refuses, so the unread settings are not overwritten by blanks.
+	partial      bool
 	HideEmpty    bool
 	MultiSend    bool
 	Language     string
@@ -78,7 +82,14 @@ func boolStr(b bool) string {
 func strToBool(s string) (bool, bool) { return codec.TryStrToBool(s) }
 
 // Save writes advopt.txt exactly as CreateADV does.
+//
+// FIX(re2 #8, #9): the file is replaced atomically with mode 0600 (an existing
+// 0644 advopt.txt from the Pascal node is tightened), and nothing is written
+// after a Load that did not read the whole file.
 func (o *Options) Save(path string) error {
+	if o.partial {
+		return errors.New("advopt: the file was only partly read; not overwriting it (fix or remove the offending line)")
+	}
 	var sb strings.Builder
 	w := func(s string) { sb.WriteString(s + "\n") }
 	w("---NosoNode config file.---")
@@ -157,20 +168,32 @@ func (o *Options) Save(path string) error {
 	w("---Deprecated. To be removed.---")
 	w("MaxPeers " + codec.IntToStr(int64(o.MaxPeers)))
 	w("PosWarning " + codec.IntToStr(o.PosWarning))
-	return os.WriteFile(path, []byte(sb.String()), 0o600) // FIX(H-10): holds tokens
+	return writeFileAtomic(path, []byte(sb.String())) // FIX(H-10): holds tokens, 0600
 }
 
 // Load mirrors LoadADV: lines are matched on their first blank-separated
-// word (case sensitive) and an invalid boolean aborts the rest of the file.
+// word (case sensitive). COMPAT BREAK (re2 #9): the original stops at an
+// invalid boolean, which here would leave every later setting (AdminKey,
+// tokens) at its default and blank it on the next Save; this port skips the
+// bad line, reads the rest and returns an error naming the first bad line.
+// A read error (for instance a line over 1 MiB) stops the load and makes Save
+// refuse. A Pascal-era file with a loose mode is tightened to 0600.
 func (o *Options) Load(path string) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+	if st, err := f.Stat(); err == nil && st.Mode().Perm()&0o077 != 0 {
+		_ = os.Chmod(path, 0o600)
+	}
+	o.partial = false
+	var firstBad error
+	lineNo := 0
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 1<<20), 1<<20)
 	for sc.Scan() {
+		lineNo++
 		line := strings.TrimSuffix(sc.Text(), "\r")
 		p := func(n int64) string { return codec.Parameter(line, n) }
 		bl := func(dst *bool) bool {
@@ -261,9 +284,13 @@ func (o *Options) Load(path string) error {
 		case "WO_FullNode":
 			ok = bl(&o.FullNode)
 		}
-		if !ok {
-			return errors.New("advopt: invalid boolean")
+		if !ok && firstBad == nil {
+			firstBad = fmt.Errorf("advopt: line %d: invalid boolean", lineNo)
 		}
 	}
-	return nil
+	if err := sc.Err(); err != nil {
+		o.partial = true
+		return fmt.Errorf("advopt: stopped reading after line %d: %w", lineNo, err)
+	}
+	return firstBad
 }
