@@ -12,8 +12,7 @@ import (
 	"github.com/pasichDev/noso-node-go/internal/types"
 )
 
-// Regression tests for the re2 storage review (scratchpad/re2-storage.md).
-// Each one failed on dbd506a.
+// Regression tests for the storage review.
 
 func tRec() types.Wallet { return newWalletRecord(crypto.GenerateKeyPair()) }
 
