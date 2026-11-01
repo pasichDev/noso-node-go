@@ -35,6 +35,9 @@ type options struct {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "init-network" {
+		os.Exit(initNetwork(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	var o options
 	flag.StringVar(&o.data, "data", "NOSODATA", "data directory (same layout as the original NOSODATA folder)")
 	flag.StringVar(&o.seedURL, "seed-url", "", "https URL of a signed seed list (needs ReleaseKey in advopt.txt); nothing is downloaded without it")
@@ -71,6 +74,13 @@ func run(opt options, sig <-chan os.Signal) (restart bool) {
 	if err := cli.CheckNewPassphrase(*data, pass); err != nil { // finding 20
 		log.Fatalf("wallet passphrase: %v", err)
 	}
+	// FIX(C3): one process owns a data directory. The lock is kept for the whole
+	// run (and released before a restart reopens the directory).
+	lock, err := storage.LockDataDir(*data)
+	if err != nil {
+		log.Fatalf("cannot open data directory: %v", err)
+	}
+	defer lock.Close()
 	cfg := node.Config{WalletPassphrase: pass, InsecurePlainWallet: *plainWallet}
 	if *seedURL != "" {
 		cfg.FetchSeeds = func() string {
@@ -85,6 +95,10 @@ func run(opt options, sig <-chan os.Signal) (restart bool) {
 		log.Fatalf("cannot open data directory: %v", err)
 	}
 	n.EnsureRPCTokens()
+	dev, isDev := readDevClock(*data)
+	if isDev {
+		n.SetClock(dev.now)
+	}
 	limiter := &logx.Limiter{Rate: 200}
 	logf := func(ch, msg string) {
 		if limiter.Allow() {
@@ -94,6 +108,16 @@ func run(opt options, sig <-chan os.Signal) (restart bool) {
 	n.Log = logf
 	e := network.NewEngine(n)
 	e.Log = logf
+	if isDev { // connection timers stay in real seconds, only the chain clock is fast
+		e.Wall = func() int64 { return time.Now().Unix() }
+		logf("console", fmt.Sprintf("TEST NETWORK: chain clock runs %dx faster than real time", dev.scale))
+	}
+	if w := n.Wallet.LegacyWarning(); w != "" {
+		logf("console", w)
+	}
+	for _, w := range n.Wallet.Warnings() {
+		logf("console", w)
+	}
 	r := rpc.New(e)
 	r.Log = logf
 	d := cli.New(n, e, r)
@@ -106,9 +130,10 @@ func run(opt options, sig <-chan os.Signal) (restart bool) {
 		}
 	}
 	d.Quit = ask
+	d.CanRestart = true
 	r.Restart = func() { ask(true) }
 
-	if !*noNTP {
+	if !*noNTP && !isDev {
 		e.UpdateTimeOffset(n.CFG.Param(2))
 	}
 	if !*noP2P {
@@ -140,7 +165,7 @@ func run(opt options, sig <-chan os.Signal) (restart bool) {
 			case <-quit:
 				return
 			case <-t.C:
-				if !*noNTP {
+				if !*noNTP && !isDev {
 					e.UpdateTimeOffset(n.CFG.Param(2))
 				}
 			}
@@ -160,7 +185,6 @@ func run(opt options, sig <-chan os.Signal) (restart bool) {
 	r.Stop()
 	if ln != nil {
 		_ = ln.Close()
-		_ = os.Remove(control.SocketPath(*data))
 	}
 	e.Stop()
 	_ = os.WriteFile(n.Lay.ClosedMarker, nil, 0o644)

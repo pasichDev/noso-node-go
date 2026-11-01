@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -607,14 +608,31 @@ func restoreSummary(d *Dispatcher) {
 // cmdRestoreChain mirrors RestoreBlockChain (mpdisk.pas:795-807): the
 // summary, headers and every block are deleted; the daemon restarts.
 func cmdRestoreChain(d *Dispatcher, l string) {
+	// FIX(M5): this deletes the whole chain, so it asks for a confirmation,
+	// needs a front end that can restart the node (otherwise the running node
+	// would keep working on deleted files) and removes every file derived
+	// from the blocks, not just some of them.
+	if strings.ToLower(p(l, 1)) != "confirm" {
+		d.log("This deletes the blockchain and all state derived from it. Run `restoreblockchain confirm`.")
+		return
+	}
+	if d.Quit == nil || !d.CanRestart {
+		d.log("This program cannot restart the node; stop it and start it again after running the command in nosocli with no daemon running.")
+		if d.E != nil {
+			return
+		}
+	}
 	if d.E != nil {
 		d.E.StopServer()
 	}
-	_ = os.Remove(d.N.Lay.Summary)
-	_ = os.Remove(d.N.Lay.Summary + ".bak")
-	_ = os.Remove(d.N.Lay.Headers)
-	_ = os.RemoveAll(d.N.Lay.BlockDir)
-	if d.Quit != nil {
+	lay := d.N.Lay
+	for _, f := range []string{lay.Summary, lay.Summary + ".bak", lay.Headers, lay.GVTs, lay.PSOs,
+		filepath.Join(lay.Root, "highwater.seq")} {
+		_ = os.Remove(f)
+	}
+	_ = os.RemoveAll(lay.BlockDir)
+	_ = os.RemoveAll(filepath.Join(lay.Root, "UNDO"))
+	if d.Quit != nil && d.CanRestart {
 		d.Quit(true)
 	} else {
 		d.log("Blockchain files deleted; start nosod to resynchronise.")
@@ -746,3 +764,48 @@ func cmdTT(d *Dispatcher, l string) {
 // seedHTTPClient verifies certificates (the default transport does); tests
 // replace it to trust a local server.
 var seedHTTPClient = &http.Client{Timeout: 5 * time.Second}
+
+// reloadNodes hands the edited seed list to the running engine (it kept the
+// old list until a restart).
+func (d *Dispatcher) reloadNodes() {
+	if d.E != nil {
+		d.E.SetNodesArray(d.N.CFG.Param(1))
+	}
+}
+
+// cmdPubKey prints the address and public key of one wallet address (the
+// first by default), never the private key: this is what goes into the
+// proposers file of a network.
+func cmdPubKey(d *Dispatcher, l string) {
+	i := 0
+	if a := p(l, 1); a != "" {
+		if i = d.N.Wallet.IndexOf(a); i < 0 {
+			d.log("Address not found in wallet")
+			return
+		}
+	}
+	w := d.N.Wallet.At(i)
+	d.log("%s %s", w.Hash, w.PublicKey)
+}
+
+// cmdWallet: `wallet retire-legacy` removes the clear-text wallet.pkw (and
+// its backup) kept after the migration to wallet.enc.
+func cmdWallet(d *Dispatcher, l string) {
+	switch strings.ToLower(p(l, 1)) {
+	case "retire-legacy":
+		if err := d.N.Wallet.RetireLegacy(); err != nil {
+			d.log("Not retired: %v", err)
+			return
+		}
+		d.log("The clear-text wallet files were removed.")
+	case "":
+		if w := d.N.Wallet.LegacyWarning(); w != "" {
+			d.log("%s", w)
+		}
+		for _, w := range d.N.Wallet.Warnings() {
+			d.log("%s", w)
+		}
+	default:
+		d.log("Syntax: wallet [retire-legacy]")
+	}
+}

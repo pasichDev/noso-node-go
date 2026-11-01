@@ -33,6 +33,14 @@ const (
 func (e *Engine) Start() {
 	e.SetNodesArray(e.N.CFG.Param(1))
 	e.mnsRandomWait = int64(rand.Intn(21))
+	// FIX(C2): the listener opens at start when the node is set to serve, not
+	// after a vote has declared the node up to date; the old order made it
+	// impossible to bring a new network up without a console trick.
+	if o := e.N.Options(); o.AutoServer && !e.ServerActive() {
+		if err := e.StartServer(int(codec.StrToIntDef(o.MNPort, 8080))); err != nil {
+			e.logf("console", "Unable to start the server: "+err.Error())
+		}
+	}
 	e.spawn(e.heartbeatLoop)
 	e.spawn(e.keepConnectLoop)
 	e.spawn(e.mnLoop)
@@ -52,6 +60,11 @@ func (e *Engine) Stop() {
 	for i := 1; i <= MaxConnections; i++ {
 		e.CloseSlot(i)
 	}
+	e.connMu.Lock() // one-shot transfers that are not peers (M8)
+	for c := range e.conns {
+		_ = c.Close()
+	}
+	e.connMu.Unlock()
 	e.wg.Wait()
 }
 
@@ -78,8 +91,10 @@ func (e *Engine) Tick() {
 	e.engineLastUpdate = n.UTCTime()
 	build := e.buildNMSBlock
 	e.mu.Unlock()
-	if n.Options().BuildBlocks && n.InTurn(build) && n.UTCTime() >= build && build > 0 && n.ConStatus() == 3 &&
-		codec.IntToStr(n.MyLastBlock()) == e.GetConsensus(CLastBlock) {
+	// FIX(C1, H-5): the builder needs to be up to date with its peers
+	// (state 3), not to hold the block the seeds voted for. A proposer that is
+	// ahead of the vote is the normal case, since nobody else has its block yet.
+	if n.Options().BuildBlocks && n.InTurn(build) && n.UTCTime() >= build && build > 0 && n.ConStatus() == 3 {
 		e.logf("events", "Starting construction of block "+codec.IntToStr(n.MyLastBlock()+1))
 		_, err := n.BuildNewBlock(n.MyLastBlock()+1, build, n.MyLastBlockHash(), BuildMiner, BuildSolution)
 		if err != nil {
@@ -134,32 +149,30 @@ func (e *Engine) BuildTime() int64 {
 	return e.buildNMSBlock
 }
 
-// keepConnectLoop mirrors TThreadKeepConnect (masterpaskalform.pas:1401).
+// keepConnectLoop mirrors TThreadKeepConnect (masterpaskalform.pas:1401). It
+// dials every configured node that is not connected yet, one per pass,
+// starting at a rotating position. A node is a host and a port: several
+// nodes may run on one machine. A node never dials itself.
 func (e *Engine) keepConnectLoop() {
 	last := 0
 	for {
-		n := e.N
-		try := true
-		if e.TotalConnections() >= 99 || e.SyncedConnections() >= 3 {
-			try = false
-		}
-		if n.BlockAge() < 10 || n.BlockAge() > 595 {
-			try = false
-		}
-		if try {
+		if e.TotalConnections() < 99 {
 			nodes := e.nodesList()
-			if len(nodes) > 0 {
-				last++
-				if last >= len(nodes) {
-					last = 0
-				}
+			for k := 0; k < len(nodes); k++ {
+				last = (last + 1) % len(nodes)
 				nd := nodes[last]
-				if e.GetSlotFromIP(nd.ip) == 0 && e.freeSlot() > 0 && nd.ip != n.Options().MNIP {
+				port := int(codec.StrToIntDef(nd.port, 8080))
+				if e.isSelf(nd.ip, nd.port) {
+					continue
+				}
+				if e.slotForEndpoint(nd.ip, port) == 0 && e.freeSlot() > 0 {
 					e.ConnectClient(nd.ip, nd.port)
+					break
 				}
 			}
 		}
-		if !e.sleep(3 * time.Second) {
+		// jitter keeps two nodes from dialling each other at the same moment
+		if !e.sleep(2*time.Second + time.Duration(rand.Intn(1000))*time.Millisecond) {
 			return
 		}
 	}
@@ -186,6 +199,9 @@ func (e *Engine) nodesList() []hostPort {
 		ip := codec.Parameter(item, 0)
 		if ip == "" {
 			break
+		}
+		if ip == "null" { // the empty marker of the configuration, not a host
+			continue
 		}
 		out = append(out, hostPort{ip, codec.IntToStr(codec.StrToIntDef(codec.Parameter(item, 1), 8080))})
 	}
@@ -243,6 +259,11 @@ func (e *Engine) mnLoop() {
 			}
 		}
 		for n.WaitingMNsLen() > 0 {
+			select {
+			case <-e.stop: // FIX(M-1): shutdown does not wait for a backlog of challenges
+				return
+			default:
+			}
 			line := n.PopWaitingMN()
 			if !n.IPMNAlreadyProcessed(line) && e.challengeReport(line) {
 				if info := n.CheckMNReport(line, n.MyLastBlock()); info != "" {
@@ -251,6 +272,34 @@ func (e *Engine) mnLoop() {
 			}
 		}
 	}
+}
+
+// maxWaitingMNs bounds the queue of reports waiting for a challenge.
+const maxWaitingMNs = 256
+
+// queueMNReport admits a received $MNREPO line to the challenge queue. FIX
+// (H-3): the report is parsed, bound to the current block and its stake
+// checked before anything else: before the sender's IP is marked as received
+// (so garbage cannot burn a masternode's slot) and before the node dials the
+// IP the report names (so an unstaked key cannot make the node dial anywhere).
+func (e *Engine) queueMNReport(line string) {
+	n := e.N
+	p := strings.IndexByte(line, '$')
+	if p < 0 {
+		return
+	}
+	m, ok := node.ParseMNode(line[p:])
+	if !ok {
+		return
+	}
+	block := n.MyLastBlock()
+	if int64(m.First) != block || int64(m.Last) != block || !n.IsLegitNewNode(m, block) {
+		return
+	}
+	if n.WaitingMNsLen() >= maxWaitingMNs {
+		return
+	}
+	n.AddWaitingMN(line)
 }
 
 // GetMyIP asks up to three known nodes which address they see us from and
@@ -343,11 +392,14 @@ func (e *Engine) SendOrderToNode(line string) string {
 	}
 	res := ""
 	for try := 0; try < 3; try++ {
-		sl, ok := e.ValidSlotForSeed()
+		sl, ok := e.anyPeerSlot()
 		if !ok {
 			continue
 		}
 		p := e.peers.get(sl)
+		if p.ListeningPort <= 0 {
+			continue
+		}
 		res = e.RequestLine(p.IP, p.ListeningPort, line)
 		if res != "" {
 			break
@@ -465,7 +517,10 @@ func (e *Engine) challengeReport(line string) bool {
 	if !ok {
 		return false
 	}
-	if m.IP == e.N.Options().MNIP {
+	// FIX(M-1): only a report of our own masternode (same IP, sign and funds
+	// address as configured) is believed without a challenge; the IP alone let
+	// a funded stranger take this node's slot.
+	if o := e.N.Options(); m.IP == o.MNIP && m.Sign == o.MNSign && m.Fund == o.MNFunds {
 		return true
 	}
 	nonce := randomNonce()

@@ -168,9 +168,17 @@ func TestIncomingChecks(t *testing.T) {
 	if got := ask("GARBAGE LINE"); got != "WRONG_PROTOCOL" {
 		t.Fatalf("garbage %q", got)
 	}
-	// 127.0.0.1 is now a registered "bot" after the WRONG_PROTOCOL strike.
-	if got := ask("NSLTIME"); got != "BANNED" {
-		t.Fatalf("expected BANNED, got %q", got)
+	// FIX(M6): loopback is never banned (every local node shares it), a stranger is.
+	if got := ask("NSLTIME"); got != n.UTCTimeStr() {
+		t.Fatalf("loopback was banned after one bad greeting: %q", got)
+	}
+	e.UpdateBotData("203.0.113.7")
+	if !e.BotExists("203.0.113.7") {
+		t.Fatal("a remote address that broke the protocol is not registered")
+	}
+	e.UpdateBotData("127.0.0.1")
+	if e.BotExists("127.0.0.1") {
+		t.Fatal("loopback registered as a bot")
 	}
 	_ = storage.FundsAddress
 }

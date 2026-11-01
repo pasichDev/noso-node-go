@@ -237,11 +237,11 @@ func TestRateLimits(t *testing.T) {
 		t.Fatal("M-08: heavy request budget")
 	}
 	for i := 0; i < 200; i++ {
-		if !e.lineBudget(7) {
+		if !e.lineBudget(7, "PSK 2 v 1 $PING x") {
 			t.Fatal("early line refusal")
 		}
 	}
-	if e.lineBudget(7) || !e.lineBudget(8) {
+	if e.lineBudget(7, "PSK 2 v 1 $PING x") || !e.lineBudget(8, "PSK 2 v 1 $PING x") {
 		t.Fatal("M-07: line budget")
 	}
 }
@@ -306,6 +306,9 @@ func TestM10_OnlyProposersBuild(t *testing.T) {
 		t.Fatal("M-10: a node that is not a configured proposer built a block")
 	}
 	n.UpdateOptions(func(o *node.StorageOptions) { o.BuildBlocks = true })
+	if err := n.SetProposers([]string{n.Wallet.At(0).PublicKey}); err != nil {
+		t.Fatal(err)
+	}
 	e.mu.Lock()
 	e.buildNMSBlock = (clk.now() / 600) * 600
 	e.mu.Unlock()

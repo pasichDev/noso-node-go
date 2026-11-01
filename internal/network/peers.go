@@ -86,14 +86,39 @@ func (e *Engine) GetSlotFromIP(ip string) int {
 	return 0
 }
 
+// slotForEndpoint returns the slot already connected to ip:port, or 0. A
+// remote host counts once whatever the port. Only loopback addresses are told
+// apart by port, since nodes started on one machine all share the address and
+// a port claimed by a stranger must not buy a second connection.
+func (e *Engine) slotForEndpoint(ip string, port int) int {
+	e.peers.mu.Lock()
+	defer e.peers.mu.Unlock()
+	for i := 1; i <= MaxConnections; i++ {
+		s := e.peers.slots[i]
+		if s == nil || s.p.Tipo == "" || s.p.IP != ip {
+			continue
+		}
+		if !isLoopback(ip) || (port > 0 && s.p.ListeningPort == port) {
+			return i
+		}
+	}
+	return 0
+}
+
 // Peer returns a copy of the slot data (GetConexIndex).
 func (e *Engine) Peer(i int) Peer { return e.peers.get(i) }
 
 // SaveConnection mirrors SaveConection (mpred.pas:116-158). A slot of -1
 // picks the first free one; 0 is returned when the table is full.
 func (e *Engine) SaveConnection(tipo, ip string, conn *Conn, to int) int {
-	p := Peer{Tipo: tipo, IP: codec.Truncate(ip, 20), LastPing: e.N.UTCTimeStr(), LastBlock: "0",
-		ListeningPort: -1}
+	return e.saveConnectionPort(tipo, ip, -1, conn, to)
+}
+
+// saveConnectionPort is SaveConnection for a peer whose listening port is
+// already known (it was dialled, or it announced the port in its greeting).
+func (e *Engine) saveConnectionPort(tipo, ip string, port int, conn *Conn, to int) int {
+	p := Peer{Tipo: tipo, IP: codec.Truncate(ip, 20), LastPing: e.nowStr(), LastBlock: "0",
+		ListeningPort: port}
 	e.peers.mu.Lock()
 	defer e.peers.mu.Unlock()
 	mk := func() *slot {
@@ -106,7 +131,8 @@ func (e *Engine) SaveConnection(tipo, ip string, conn *Conn, to int) int {
 	// FIX(finding 17): the duplicate check is made under the same lock as
 	// the insert; two simultaneous connections from one IP cannot both pass.
 	for i := 1; i <= MaxConnections; i++ {
-		if s := e.peers.slots[i]; s != nil && s.p.Tipo != "" && s.p.IP == p.IP && tipo == "CLI" {
+		if s := e.peers.slots[i]; s != nil && s.p.Tipo != "" && s.p.IP == p.IP && tipo == "CLI" &&
+			(!isLoopback(p.IP) || (port > 0 && s.p.ListeningPort == port)) {
 			return 0
 		}
 	}
@@ -133,12 +159,33 @@ func (e *Engine) ReserveSlot() int {
 }
 
 // CloseSlot mirrors CloseSlot (nosonetwork.pas:651-673).
-func (e *Engine) CloseSlot(i int) {
+func (e *Engine) CloseSlot(i int) { e.closeSlotObj(i, nil) }
+
+// closeSlotObj closes slot i, but only when it still holds s (any when s is
+// nil): the number may belong to a newer connection by now.
+func (e *Engine) closeSlotObj(i int, want *slot) {
 	if i < 1 || i > MaxConnections {
 		return
 	}
 	e.peers.mu.Lock()
 	s := e.peers.slots[i]
+	if want != nil && s != want {
+		e.peers.mu.Unlock()
+		e.expMu.Lock()
+		for k := range e.expect {
+			if k.s == want {
+				delete(e.expect, k)
+			}
+		}
+		e.expMu.Unlock()
+		want.once.Do(func() {
+			close(want.closed)
+			if want.conn != nil {
+				_ = want.conn.Close()
+			}
+		})
+		return
+	}
 	e.peers.slots[i] = nil
 	e.peers.mu.Unlock()
 	if s == nil {
@@ -295,7 +342,7 @@ func (e *Engine) ProcessPing(line string, i int, reply bool) {
 	merkle := crypto.IDHash(lastBlock + codec.Copy(resumenHash, 0, 5) + codec.Copy(mnsHash, 0, 5) +
 		codec.Copy(lastBlockHash, 0, 5) + codec.Copy(sumHash, 0, 5) +
 		codec.Copy(gvtsHash, 0, 5) + codec.Copy(cfgHash, 0, 5))
-	now := e.N.UTCTimeStr()
+	now := e.nowStr()
 	offset := codec.StrToInt64Def(g(3), e.N.UTCTime()) - e.N.UTCTime()
 	// FIX(finding 17): the fields are written into the slot under the table
 	// lock instead of copying the whole Peer out and back, which could
@@ -317,7 +364,9 @@ func (e *Engine) ProcessPing(line string, i int, reply bool) {
 	p.Pending = int(codec.StrToIntDef(g(9), 0))
 	p.ResumenHash = resumenHash
 	p.ConexStatus = int(codec.StrToIntDef(g(11), 0))
-	p.ListeningPort = int(codec.StrToIntDef(g(12), -1))
+	if lp := int(codec.StrToIntDef(g(12), -1)); lp > 0 || p.ListeningPort <= 0 {
+		p.ListeningPort = lp
+	}
 	p.MNsHash = mnsHash
 	p.MNsCount = int(codec.StrToIntDef(g(14), 0))
 	p.BestHashDiff = "null"

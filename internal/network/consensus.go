@@ -104,10 +104,10 @@ func (e *Engine) SetNodesArray(list string) {
 		for _, item := range strings.Split(list, " ") {
 			item = strings.ReplaceAll(item, ";", " ")
 			nc := nodeConsensus{host: codec.Parameter(item, 0), port: int(codec.StrToIntDef(codec.Parameter(item, 1), 8080))}
-			// FIX(H-04): a seed listed twice counted twice in the vote
-			// (the default list repeats an address). One host counts once
-			// whatever its port.
-			if k := nc.host; !seen[k] && nc.host != "" {
+			// FIX(H-04, M7): a seed listed twice counted twice in the vote.
+			// "null" is the empty-field marker, not a host. A seed is a host
+			// and a port, so several nodes of one machine count separately.
+			if k := nc.host + ":" + codec.IntToStr(int64(nc.port)); !seen[k] && nc.host != "" && nc.host != "null" {
 				seen[k] = true
 				arr = append(arr, nc)
 			}

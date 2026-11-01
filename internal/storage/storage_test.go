@@ -188,7 +188,7 @@ func TestCFGDefaultAndEdits(t *testing.T) {
 	if c.DataStr() != DefaultNosoCFG {
 		t.Fatal("default file")
 	}
-	if c.Param(0) != "NORMAL" || !c.IsSeedNode("204.10.194.22") || c.IsSeedNode("1.1.1.1") {
+	if c.Param(0) != "NORMAL" || c.IsSeedNode("204.10.194.22") || c.IsSeedNode("1.1.1.1") {
 		t.Fatal("params")
 	}
 	if c.Hash() != crypto.IDHash(DefaultNosoCFG) {

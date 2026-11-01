@@ -7,11 +7,13 @@ import (
 	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -29,7 +31,10 @@ func SocketPath(dataDir string) string {
 		abs = dataDir
 	}
 	sum := sha256.Sum256([]byte(abs))
-	return filepath.Join(os.TempDir(), "nosod-"+hex.EncodeToString(sum[:4]), "s.sock")
+	// FIX(L6): the name includes the user, and the directory is checked (owner
+	// and mode) by both ends, so another local user who creates it first is
+	// noticed instead of trusted.
+	return filepath.Join(os.TempDir(), fmt.Sprintf("nosod-%d-%s", os.Getuid(), hex.EncodeToString(sum[:8])), "s.sock")
 }
 
 // MaxLine bounds one command line.
@@ -38,8 +43,15 @@ const MaxLine = 64 << 10
 // Runner executes a command and streams its output.
 type Runner func(line string, out func(string))
 
-// Serve listens on path until the listener is closed.
-func Serve(path string, run Runner) (net.Listener, error) {
+// Server is a running control socket.
+type Server struct {
+	ln   net.Listener
+	path string
+	wg   sync.WaitGroup
+}
+
+// Serve listens on path until the server is closed.
+func Serve(path string, run Runner) (*Server, error) {
 	// FIX: the socket lives in a directory only the owner can enter, so the
 	// moment between creating the socket and its chmod is not reachable by
 	// other users.
@@ -50,19 +62,25 @@ func Serve(path string, run Runner) (net.Listener, error) {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return nil, err
 	}
+	if err := checkOwner(dir); err != nil {
+		return nil, err
+	}
 	_ = os.Remove(path)
 	ln, err := net.Listen("unix", path)
 	if err != nil {
 		return nil, err
 	}
 	_ = os.Chmod(path, 0o600)
+	s := &Server{ln: ln, path: path}
 	go func() {
 		for {
 			c, err := ln.Accept()
 			if err != nil {
 				return
 			}
+			s.wg.Add(1)
 			go func() {
+				defer s.wg.Done()
 				defer c.Close()
 				_ = c.SetDeadline(time.Now().Add(10 * time.Minute))
 				// FIX: the command line is bounded (it was read without limit).
@@ -75,11 +93,26 @@ func Serve(path string, run Runner) (net.Listener, error) {
 			}()
 		}
 	}()
-	return ln, nil
+	return s, nil
+}
+
+// Close stops accepting, waits for the commands in progress (FIX(M4): a
+// restart used to reopen the data directory while an old command still wrote
+// to it) and removes the socket.
+func (s *Server) Close() error {
+	err := s.ln.Close()
+	s.wg.Wait()
+	_ = os.Remove(s.path)
+	return err
 }
 
 // Call sends one command to a running daemon and relays its output to w.
 func Call(path, line string, w io.Writer) error {
+	if strings.HasPrefix(path, os.TempDir()) { // the shared-directory case
+		if err := checkOwner(filepath.Dir(path)); err != nil {
+			return err
+		}
+	}
 	c, err := net.DialTimeout("unix", path, 2*time.Second)
 	if err != nil {
 		return err

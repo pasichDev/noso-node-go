@@ -109,6 +109,24 @@ func init() {
 				d.E.ConnectClient(p(l, 1), port)
 			}
 		},
+		"DENYPEER": func(d *Dispatcher, l string) {
+			if d.needNet() {
+				if hp := p(l, 1); hp == "" {
+					d.log("denied: %s", strings.Join(d.E.DeniedPeers(), " "))
+				} else {
+					d.E.DenyPeer(hp)
+					d.log("%s is cut off: connection closed, not dialled, refused", hp)
+				}
+			}
+		},
+		"ALLOWPEER": func(d *Dispatcher, l string) {
+			if d.needNet() {
+				d.E.AllowPeer(p(l, 1))
+				d.log("denied: %s", strings.Join(d.E.DeniedPeers(), " "))
+			}
+		},
+		"PUBKEY": cmdPubKey,
+		"WALLET": cmdWallet,
 		"MYIP": func(d *Dispatcher, l string) {
 			if d.needNet() {
 				d.log("%s", d.E.GetMyIP())
@@ -388,14 +406,14 @@ func init() {
 
 		// configuration (nosocfg)
 		"SETMODE":    func(d *Dispatcher, l string) { cfgErr(d, d.N.CFG.SetData(p(l, 1), 0)) },
-		"ADDNODE":    func(d *Dispatcher, l string) { cfgErr(d, d.N.CFG.Add(p(l, 1), 1)) },
-		"DELNODE":    func(d *Dispatcher, l string) { cfgErr(d, d.N.CFG.Remove(p(l, 1), 1)) },
+		"ADDNODE":    func(d *Dispatcher, l string) { cfgErr(d, d.N.CFG.Add(p(l, 1), 1)); d.reloadNodes() },
+		"DELNODE":    func(d *Dispatcher, l string) { cfgErr(d, d.N.CFG.Remove(p(l, 1), 1)); d.reloadNodes() },
 		"ADDPOOL":    func(d *Dispatcher, l string) { cfgErr(d, d.N.CFG.Add(p(l, 1), 3)) },
 		"DELPOOL":    func(d *Dispatcher, l string) { cfgErr(d, d.N.CFG.Remove(p(l, 1), 3)) },
 		"ADDNOSOPAY": func(d *Dispatcher, l string) { cfgErr(d, d.N.CFG.Add(p(l, 1), 6)) },
 		"DELNOSOPAY": func(d *Dispatcher, l string) { cfgErr(d, d.N.CFG.Remove(p(l, 1), 6)) },
-		"RESTORECFG": func(d *Dispatcher, l string) { d.N.CFG.Restore() },
-		"CLEARCFG":   func(d *Dispatcher, l string) { d.N.CFG.Clear(p(l, 1)) },
+		"RESTORECFG": func(d *Dispatcher, l string) { d.N.CFG.Restore(); d.reloadNodes() },
+		"CLEARCFG":   func(d *Dispatcher, l string) { d.N.CFG.Clear(p(l, 1)); d.reloadNodes() },
 		"DIRECTIVE":  cmdDirective,
 		"SIGNCFG":    cmdSignCfg,
 

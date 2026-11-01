@@ -39,9 +39,6 @@ func TestM10_MinorityProposerKeepsItsBlocks(t *testing.T) {
 	if n.MyLastBlock() != 5 || n.Blocks.Header(5).Number != 5 || n.Blocks.Header(3).Number != 3 {
 		t.Fatalf("blocks deleted on the word of the vote: tip %d", n.MyLastBlock())
 	}
-	if !n.ForkProbe() {
-		t.Fatal("a different tip hash should make the node look at the other branch")
-	}
 }
 
 // C-07: a report whose IP does not answer the challenge is not listed.

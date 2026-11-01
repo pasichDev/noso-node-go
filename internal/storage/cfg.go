@@ -10,11 +10,15 @@ import (
 	"github.com/pasichDev/noso-node-go/internal/crypto"
 )
 
-// DefaultNosoCFG is nosonosocfg.pas:41-47. Fields, separated by blanks:
+// DefaultNosoCFG is nosonosocfg.pas:41-47 without its compiled-in seed list:
+// the nine seed addresses of the original network are gone (that network is
+// dead and the addresses may belong to someone else now), so a new node
+// connects to nobody until its operator writes the seeds of the network it
+// means to join (nosod init-network, `addnode`). Fields, separated by blanks:
 // 0 mainnet mode, 1 seed nodes, 2 NTP servers, 3 and 4 deprecated, 5 frozen
 // (locked) addresses.
 const DefaultNosoCFG = "NORMAL " +
-	"204.10.194.22;8080:204.10.194.29;8080:204.10.194.32;8080:204.10.194.36;8080:204.10.194.33;8080:38.242.252.153;8080:157.173.99.119;8080:38.242.252.234;8080:4.233.61.8;8080: " +
+	"null: " +
 	"ts2.aco.net:hora.roa.es:time.esa.int:time.stdtime.gov.tw:stratum-1.sjc02.svwh.net:ntp1.sp.se:1.de.pool.ntp.org:ntps1.pads.ufrj.br:utcnist2.colorado.edu:tick.usask.ca:ntp1.st.keio.ac.jp: " +
 	"null: " +
 	"null: " +

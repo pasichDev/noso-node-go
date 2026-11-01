@@ -2,6 +2,7 @@ package network
 
 import (
 	"net"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -11,6 +12,13 @@ import (
 	"github.com/pasichDev/noso-node-go/internal/crypto"
 	"github.com/pasichDev/noso-node-go/internal/node"
 )
+
+// DefaultMinPeers is the number of connections that makes a node count as
+// connected. One is enough to hear where the chain stands and to be heard;
+// the blocks are verified whoever delivers them, and a node that would sit
+// idle while one of its three siblings restarts is worse than the original's
+// stricter 3 (mpred.pas:499).
+const DefaultMinPeers = 1
 
 // Engine runs the peer-to-peer side of a node: the listener, the peer
 // slots, protocol processing, consensus polling and synchronisation. It
@@ -69,6 +77,23 @@ type Engine struct {
 	// Dial opens outgoing connections; replaceable for tests.
 	Dial func(addr string, timeout time.Duration) (net.Conn, error)
 
+	// Wall is the clock of the connection timers (ping timeouts, request
+	// throttles, reply windows, budgets). It is nil for the node's chain clock;
+	// a test network whose chain clock runs faster than real time sets it to
+	// real seconds, so that a 15 second ping timeout stays 15 real seconds.
+	Wall func() int64
+
+	// network access control (see DenyPeer) and the block puller
+	denyMu   sync.Mutex
+	denied   map[string]bool
+	syncMu   sync.Mutex
+	peerSync map[*slot]*pullState
+	pullSlot *slot
+	connMu   sync.Mutex
+	conns    map[*Conn]struct{} // accepted connections that are not peers yet
+	rejected map[string]bool    // peer tip|own tip pairs that were weighed and lost
+	pullAt   int64
+
 	Log func(ch, msg string)
 
 	big sync.Mutex // guards the throttle and download flags shared by Tick and the slot goroutines (M-06)
@@ -80,6 +105,7 @@ type Engine struct {
 	fileLast  map[string]int64   // kind+ip -> last served
 	heavy     map[string][]int64 // ip -> recent heavy requests
 	lineLog   map[int][]int64    // slot -> recent line times
+	bulkLog   map[int][]int64    // slot -> recent bulk line times
 	byteWin   map[int]*window    // slot -> bytes received in the current window
 	mnRepoWin map[int]*window    // slot -> $MNREPO lines in the current window
 	sendSlots chan struct{}      // bounds file transfers being sent at once
@@ -90,9 +116,9 @@ type Engine struct {
 
 // NewEngine builds an engine around a node and wires the node hooks.
 func NewEngine(n *node.Node) *Engine {
-	e := &Engine{N: n, MinPeers: 3, bots: map[string]int64{}, ipCtl: map[string]int{},
-		stop:   make(chan struct{}),
-		expect: map[expectKey]int64{}, fileLast: map[string]int64{}, heavy: map[string][]int64{}, lineLog: map[int][]int64{},
+	e := &Engine{N: n, MinPeers: DefaultMinPeers, bots: map[string]int64{}, ipCtl: map[string]int{},
+		stop: make(chan struct{}), denied: map[string]bool{}, peerSync: map[*slot]*pullState{}, rejected: map[string]bool{}, conns: map[*Conn]struct{}{},
+		expect: map[expectKey]int64{}, fileLast: map[string]int64{}, heavy: map[string][]int64{}, lineLog: map[int][]int64{}, bulkLog: map[int][]int64{},
 		byteWin: map[int]*window{}, mnRepoWin: map[int]*window{}, sendSlots: make(chan struct{}, maxSendsAtOnce)}
 	e.Dial = func(addr string, to time.Duration) (net.Conn, error) { return net.DialTimeout("tcp", addr, to) }
 	n.Consensus = e.GetConsensus
@@ -106,6 +132,16 @@ func NewEngine(n *node.Node) *Engine {
 	}
 	return e
 }
+
+// now is the connection clock in seconds (see Wall).
+func (e *Engine) now() int64 {
+	if e.Wall != nil {
+		return e.Wall()
+	}
+	return e.N.UTCTime()
+}
+
+func (e *Engine) nowStr() string { return codec.IntToStr(e.now()) }
 
 func (e *Engine) logf(ch, msg string) {
 	if e.Log != nil {
@@ -225,11 +261,11 @@ func (e *Engine) engineLastUpdateValue() int64 {
 
 // UpdateBotData registers a refusal timestamp for ip (seeds are exempt).
 func (e *Engine) UpdateBotData(ip string) {
-	if e.N.IsSeedNode(ip) {
+	if e.N.IsSeedNode(ip) || isLoopback(ip) { // every local node shares the address: banning it would ban them all
 		return
 	}
 	e.botsMu.Lock()
-	e.bots[ip] = e.N.UTCTime()
+	e.bots[ip] = e.now()
 	e.botsMu.Unlock()
 }
 
@@ -262,6 +298,9 @@ func (e *Engine) DeleteBots() {
 
 // AddIPControl mirrors nosoipcontrol.pas:AddIPControl.
 func (e *Engine) AddIPControl(ip string) int {
+	if isLoopback(ip) {
+		return 0
+	}
 	e.botsMu.Lock()
 	defer e.botsMu.Unlock()
 	e.ipCtl[ip]++
@@ -317,7 +356,7 @@ func (e *Engine) expectReply(slot int, kind string) {
 		return
 	}
 	e.expMu.Lock()
-	e.expect[expectKey{s, kind}] = e.N.UTCTime() + replyWindow
+	e.expect[expectKey{s, kind}] = e.now() + replyWindow
 	e.expMu.Unlock()
 }
 
@@ -332,6 +371,7 @@ func (e *Engine) forgetSlot(s *slot, i int) {
 	e.expMu.Unlock()
 	e.limMu.Lock()
 	delete(e.lineLog, i)
+	delete(e.bulkLog, i)
 	delete(e.byteWin, i)
 	delete(e.mnRepoWin, i)
 	e.limMu.Unlock()
@@ -348,7 +388,7 @@ func (e *Engine) takeReply(slot int, kind string) bool {
 	k := expectKey{s, kind}
 	exp, ok := e.expect[k]
 	delete(e.expect, k)
-	return ok && exp >= e.N.UTCTime()
+	return ok && exp >= e.now()
 }
 
 // request sends a protocol request to a slot and expects the answer.
@@ -361,11 +401,15 @@ func (e *Engine) request(slot int, code int, kind string) {
 // FIX(L-04): the original kept one global timer per file kind, so one peer's
 // request starved every other peer (mpprotocol.pas:472-480, 509-517).
 func (e *Engine) filePermit(kind, ip string) bool {
-	now := e.N.UTCTime()
+	now := e.now()
 	e.limMu.Lock()
 	defer e.limMu.Unlock()
 	k := kind + "|" + ip
-	if now < e.fileLast[k]+10 {
+	gap := int64(10)
+	if kind == "$LASTBLOCK" {
+		gap = 1 // catching up is many requests; every answer is verified block by block
+	}
+	if now < e.fileLast[k]+gap {
 		return false
 	}
 	e.fileLast[k] = now
@@ -377,7 +421,7 @@ func (e *Engine) filePermit(kind, ip string) bool {
 
 // heavyOK allows a peer ten costly one-shot requests per minute (M-08).
 func (e *Engine) heavyOK(ip string) bool {
-	now := e.N.UTCTime()
+	now := e.now()
 	e.limMu.Lock()
 	defer e.limMu.Unlock()
 	l := e.heavy[ip][:0]
@@ -398,21 +442,30 @@ func (e *Engine) heavyOK(ip string) bool {
 }
 
 // lineBudget allows 200 protocol lines per 10 seconds per connection (M-07).
-func (e *Engine) lineBudget(slot int) bool {
-	now := e.N.UTCTime()
+// FIX(H5): the answers to $GETMNS and $GETPENDING are one line per masternode
+// or order, so those line kinds (reports, orders, customisations) are counted
+// against a bulk budget instead; each is capped by its own limits (the byte
+// budget, the $MNREPO budget, the pool).
+func (e *Engine) lineBudget(slot int, line string) bool {
+	now := e.now()
+	log, limit := e.lineLog, 200
+	switch codec.ASCIIUpper(codec.Parameter(line, 4)) {
+	case "$MNREPO", "ORDER", "$CUSTOM", "$SNDGVT":
+		log, limit = e.bulkLog, bulkLines
+	}
 	e.limMu.Lock()
 	defer e.limMu.Unlock()
-	l := e.lineLog[slot][:0]
-	for _, t := range e.lineLog[slot] {
+	l := log[slot][:0]
+	for _, t := range log[slot] {
 		if t > now-10 {
 			l = append(l, t)
 		}
 	}
-	if len(l) >= 200 {
-		e.lineLog[slot] = l
+	if len(l) >= limit {
+		log[slot] = l
 		return false
 	}
-	e.lineLog[slot] = append(l, now)
+	log[slot] = append(l, now)
 	return true
 }
 
@@ -428,6 +481,7 @@ const (
 	mnRepoWindow     = 600             // seconds
 	maxIncomingBytes = 8 << 20         // queued, unprocessed lines per slot
 	maxSendsAtOnce   = 8
+	bulkLines        = 6000 // $MNREPO / ORDER lines per slot and 10 seconds (answers to $GETMNS and $GETPENDING)
 )
 
 type window struct {
@@ -438,7 +492,7 @@ type window struct {
 // charge adds amount to the slot's counter and reports whether it is still
 // within limit for the current window of span seconds.
 func (e *Engine) charge(m map[int]*window, slot, amount, span, limit int) bool {
-	now := e.N.UTCTime()
+	now := e.now()
 	e.limMu.Lock()
 	defer e.limMu.Unlock()
 	w := m[slot]
@@ -476,4 +530,67 @@ func orNull(s string) string {
 		return "null"
 	}
 	return s
+}
+
+// isLoopback reports whether ip is a local address. Nodes started on one
+// machine share it, so per-address rules (one connection, bans, flood
+// counters) cannot tell them apart and do not apply.
+func isLoopback(ip string) bool {
+	a := net.ParseIP(ip)
+	return a != nil && a.IsLoopback()
+}
+
+// peerKey names the peer behind a slot for per-peer budgets: its address, or
+// the slot itself for loopback peers.
+func (e *Engine) peerKey(sl int) string {
+	p := e.peers.get(sl)
+	if isLoopback(p.IP) {
+		return p.IP + "#" + strconv.Itoa(sl)
+	}
+	return p.IP
+}
+
+// DenyPeer cuts the node off from host:port: an open connection to it is
+// closed, it is not dialled and a connection from it is refused. It is an
+// operator control (console command `denypeer`) and the way a test creates a
+// network partition.
+func (e *Engine) DenyPeer(hostport string) {
+	e.denyMu.Lock()
+	e.denied[hostport] = true
+	e.denyMu.Unlock()
+	for i := 1; i <= MaxConnections; i++ {
+		p := e.peers.get(i)
+		if p.Tipo != "" && e.isDenied(p.IP, p.ListeningPort) {
+			e.CloseSlot(i)
+		}
+	}
+}
+
+// AllowPeer undoes DenyPeer; "all" clears the list.
+func (e *Engine) AllowPeer(hostport string) {
+	e.denyMu.Lock()
+	if hostport == "all" {
+		e.denied = map[string]bool{}
+	} else {
+		delete(e.denied, hostport)
+	}
+	e.denyMu.Unlock()
+}
+
+// DeniedPeers lists the denied host:port entries.
+func (e *Engine) DeniedPeers() []string {
+	e.denyMu.Lock()
+	defer e.denyMu.Unlock()
+	var out []string
+	for k := range e.denied {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (e *Engine) isDenied(ip string, port int) bool {
+	e.denyMu.Lock()
+	defer e.denyMu.Unlock()
+	return len(e.denied) > 0 && port > 0 && e.denied[net.JoinHostPort(ip, strconv.Itoa(port))]
 }

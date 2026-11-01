@@ -30,6 +30,8 @@ type Dispatcher struct {
 	Echo bool
 	// Quit is called by RESTART / shutdown style commands.
 	Quit func(restart bool)
+	// CanRestart is true when Quit(true) really reopens the node (nosod).
+	CanRestart bool
 	// RPCPort/RPCSetter let the daemon change the port in use.
 	mu  sync.Mutex
 	out func(string)

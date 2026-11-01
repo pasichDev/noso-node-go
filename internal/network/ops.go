@@ -123,16 +123,21 @@ func (e *Engine) SendFunds(line string, say Printer, startIdx int) string {
 		trfrs[i].OrderID = orderID
 		trfrs[i].OrderLines = int32(line_)
 	}
-	say.say("Send to: %s\nSend %s fee %s\nOrder ID: %s", dest, Int2Curr(montoShow), Int2Curr(comisionShow), orderID)
 	os := node.PTCHeader(n) + "ORDER " + codec.IntToStr(int64(line_)) + " $"
 	for _, o := range trfrs {
 		os += types.StringFromOrder(o) + " $"
 	}
 	os = os[:len(os)-2]
 	os = strings.Replace(os, "PSK", "NSLORDER", 1)
-	say.say("Send to Node %s", os)
 	res := e.SendOrderToNode(os)
+	if strings.HasPrefix(res, "ERROR") {
+		// FIX(M2): the order was not accepted by any node; it is neither
+		// announced as sent nor broadcast, and the caller sees the error.
+		say.say("The order was NOT sent: %s (%s)", res, sendErrorText(res))
+		return res
+	}
 	e.OutgoingAdd(os)
+	say.say("Send to: %s\nSend %s fee %s\nOrder ID: %s", dest, Int2Curr(montoShow), Int2Curr(comisionShow), orderID)
 	return res
 }
 
@@ -344,3 +349,15 @@ func Int2Curr(v int64) string {
 }
 
 var _ = storage.FundsAddress
+
+func sendErrorText(res string) string {
+	switch res {
+	case "ERROR 19":
+		return "could not connect to a node"
+	case "ERROR 20":
+		return "this node is not up to date yet"
+	case "ERROR 21":
+		return "no answer from the node"
+	}
+	return "refused"
+}
