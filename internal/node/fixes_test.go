@@ -424,20 +424,6 @@ func TestFinal_SendGVTReferenceIsCanonical(t *testing.T) {
 	}
 }
 
-// final-completeness GAP-5: newpso changed consensus state outside a block.
-func TestFinal_NewPSOCannotDesync(t *testing.T) {
-	b := newBed(t, 2)
-	a, f := b.nodes[0], b.nodes[1]
-	b.build(a)
-	pull(t, f, a)
-	if err := f.NewPSO(); !errors.Is(err, ErrPSOByBlockOnly) {
-		t.Fatalf("newpso answered %v", err)
-	}
-	b.build(a)
-	pull(t, f, a)
-	sameState(t, a, f)
-}
-
 // final-consensus 5 / completeness 1: the unpaid masternode share goes to the
 // miner, so the coins in existence are exactly the schedule.
 func TestFinal_UnpaidMasternodeShareGoesToTheMiner(t *testing.T) {

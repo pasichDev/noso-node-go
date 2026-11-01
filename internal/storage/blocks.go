@@ -39,7 +39,11 @@ type Block struct {
 }
 
 // TrailerMagic starts the authentication trailer of a V2 block.
-const TrailerMagic = "NSG2"
+//
+// NSG3: after the keys the trailer lists the Params of every order (empty for
+// all but the PSO order types), so the seal covers them. This is a change of
+// the block format; chains made before it cannot be read.
+const TrailerMagic = "NSG3"
 
 // ErrBlockShort is returned for truncated block files.
 var ErrBlockShort = errors.New("block file too short")
@@ -94,6 +98,13 @@ func (b *Block) SigningBytes() []byte {
 		out = append(out, byte(len(b.Keys)>>24), byte(len(b.Keys)>>16), byte(len(b.Keys)>>8), byte(len(b.Keys)))
 		for _, k := range b.Keys {
 			out = appendStr16(out, k)
+		}
+		for i := range b.Keys {
+			p := ""
+			if i < len(b.Orders) {
+				p = b.Orders[i].Params
+			}
+			out = appendStr16(out, p)
 		}
 	}
 	return out
@@ -179,6 +190,17 @@ func (b *Block) decodeTrailer(raw []byte) error {
 			return ErrBlockShort
 		}
 		b.Keys = append(b.Keys, k)
+	}
+	for i := 0; i < cnt; i++ {
+		p, ok := str()
+		if !ok {
+			return ErrBlockShort
+		}
+		if i < len(b.Orders) {
+			b.Orders[i].Params = p
+		} else if p != "" {
+			return ErrBlockShort
+		}
 	}
 	var ok1, ok2 bool
 	if b.SealKey, ok1 = str(); !ok1 {

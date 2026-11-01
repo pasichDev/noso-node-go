@@ -163,6 +163,25 @@ func (n *Node) applyOrder(o types.Order, number int64) (fee int64, ok bool, err 
 			return 0, false, nil
 		}
 		return f, true, nil
+	case PSONew:
+		// A PSO is created for the sender with the Pascal AddNewPSO semantics
+		// (owner, mode, expiry, params). The expiry counts from the block the
+		// order extends: the MyLastBlock of the node that builds this block.
+		f := consensus.GetCustFee(number)
+		mode, good := psoMode(o.Reference)
+		if !good || !psoShape(o, f) || n.PSOs.CountOwner(addr) >= consensus.MaxPSOPerOwner || !n.Summary.ValidPay(addr, f, number) {
+			return 0, false, nil
+		}
+		n.PSOs.AddNew(mode, addr, int(number-1)+storage.MNsLockExpireLapse, o.Params)
+		return f, true, nil
+	case PSOClear:
+		// Removes only the PSOs of the sender.
+		f := consensus.GetCustFee(number)
+		if !psoShape(o, f) || !n.Summary.ValidPay(addr, f, number) {
+			return 0, false, nil
+		}
+		n.PSOs.ClearOwner(addr)
+		return f, true, nil
 	case "SNDGVT":
 		// FIX(M-14): the owner's own key authorises the transfer, and the
 		// fee counts only after the debit succeeded (mpblock.pas:217-229).
@@ -357,7 +376,7 @@ func (n *Node) buildLocked(number, timestamp int64, targetHash, miner, solution 
 	var list, ignored []types.Order
 	var keys []string
 	var minerFee int64
-	var blockTrfrs, gvts int
+	var blockTrfrs, gvts, psoN int
 	seen := map[string]bool{}
 	debit := map[string]int64{}
 	if number > 0 {
@@ -378,7 +397,7 @@ func (n *Node) buildLocked(number, timestamp int64, targetHash, miner, solution 
 			}
 			group := pool[gi : gi+cnt]
 			gi += cnt
-			if skip, defer_ := n.groupNotNow(group, prev, timestamp, lastTrxs, seen, blockTrfrs, gvts); skip {
+			if skip, defer_ := n.groupNotNow(group, prev, timestamp, lastTrxs, seen, blockTrfrs, gvts, psoN); skip {
 				if defer_ {
 					ignored = append(ignored, group...)
 				}
@@ -424,9 +443,12 @@ func (n *Node) buildLocked(number, timestamp int64, targetHash, miner, solution 
 					debit[ord.Address] += fee
 				}
 				seen[ord.TrfrID] = true
-				if ord.OrderType == "SNDGVT" {
+				switch ord.OrderType {
+				case "SNDGVT":
 					gvts++
-				} else {
+				case PSONew, PSOClear:
+					psoN++
+				default:
 					blockTrfrs++
 				}
 			}
@@ -561,7 +583,7 @@ func (n *Node) buildLocked(number, timestamp int64, targetHash, miner, solution 
 
 // groupNotNow reports whether a group of pool lines is left out of this block,
 // and whether it is kept in the pool for a later one.
-func (n *Node) groupNotNow(group []types.Order, prev types.BlockHeader, timestamp int64, lastTrxs, seen map[string]bool, blockTrfrs, gvts int) (skip, keep bool) {
+func (n *Node) groupNotNow(group []types.Order, prev types.BlockHeader, timestamp int64, lastTrxs, seen map[string]bool, blockTrfrs, gvts, psos int) (skip, keep bool) {
 	first := group[0]
 	if first.TimeStamp < prev.TimeStart {
 		return true, false
@@ -575,7 +597,8 @@ func (n *Node) groupNotNow(group []types.Order, prev types.BlockHeader, timestam
 	}
 	if first.TimeStamp+60 > timestamp ||
 		(first.OrderType == "SNDGVT" && gvts+len(group) > consensus.MaxGVTPerBlock) ||
-		(first.OrderType != "SNDGVT" && blockTrfrs+len(group) > consensus.MaxTransfersPerBlock) {
+		(isPSOOrder(first.OrderType) && psos+len(group) > consensus.MaxPSOPerBlock) ||
+		(first.OrderType != "SNDGVT" && !isPSOOrder(first.OrderType) && blockTrfrs+len(group) > consensus.MaxTransfersPerBlock) {
 		return true, first.TimeStamp < timestamp+600
 	}
 	return false, false
@@ -615,6 +638,7 @@ func (n *Node) persistDerived(number int64, gvtMoved bool) error {
 		}
 	}
 	n.lastExpired = n.PSOs.ClearExpired(int(number))
+	n.PSOs.ClearExpiredPSOs(int(number))
 	return n.PSOs.Save(int(number))
 }
 

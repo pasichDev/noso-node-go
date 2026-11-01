@@ -317,6 +317,32 @@ func (e *Engine) Customize(line string, say Printer) bool {
 	return e.admitSingle(say, "CUSTOM", o, n.PTCCustom, func() string { return "Customization sent" }) != ""
 }
 
+// NewPSO signs a NEWPSO order for a wallet address, admits it to this node's
+// pool like one received from a peer and announces it. A proposer mines it into
+// a block; only then does the PSO exist, on every node.
+func (e *Engine) NewPSO(addr string, mode int, params string, say Printer) bool {
+	o, err := e.N.NewPSOOrder(addr, mode, params)
+	if err != nil {
+		say.say("The PSO order could not be built: %v", err)
+		return false
+	}
+	return e.admitSingle(say, "NEWPSO", o, e.N.PTCPSO, func() string {
+		return "PSO order sent: " + o.OrderID + " (the PSO exists once a block holds it)"
+	}) != ""
+}
+
+// ClearPSOs signs a CLRPSO order that removes the PSOs of a wallet address.
+func (e *Engine) ClearPSOs(addr string, say Printer) bool {
+	o, err := e.N.ClearPSOsOrder(addr)
+	if err != nil {
+		say.say("The PSO order could not be built: %v", err)
+		return false
+	}
+	return e.admitSingle(say, "CLRPSO", o, e.N.PTCPSO, func() string {
+		return "Clear order sent: " + o.OrderID + " (your PSOs go once a block holds it)"
+	}) != ""
+}
+
 // NewAddress mirrors the crypto thread's address generation (tipo 1).
 func (e *Engine) NewAddress() (types.Wallet, error) {
 	return e.N.Wallet.NewAddress() // written through before it is returned

@@ -208,8 +208,9 @@ replayed; nor can a chain whose block 1 was sealed before block 1 created the
 ## Block format
 
 `N.blk` is the original layout (header, 562-byte orders, PoS tail from 8425,
-masternode tail from 48010) followed by a trailer: `"NSG2"`, the count and the
-full public key of every order (empty for the project payment), then the
+masternode tail from 48010) followed by a trailer: `"NSG3"`, the count, the
+full public key of every order (empty for the project payment), the `Params` text of
+every order (empty except for `NEWPSO`), then the
 proposer key and signature. The block hash is the hash of the whole file, so it
 covers the signature, and the signature text is canonical (strict Base64, low-S
 DER; `crypto.VerifyCanonical`): a block re-encoded by a third party is refused
@@ -294,6 +295,34 @@ crash after its commit point finds them at the next start and puts the orders
 back once. The pool itself is not consensus state and is not persisted: an
 order that is in the pool when the node stops is gone (`TestReorgPutsValidOrdersBack`,
 `TestReorgDoesNotReAddMinedOrExpiredOrders`, `TestReorgCrashEveryPoint`).
+
+## PSOs
+
+A PSO is a record of `psos.dat` (owner, mode, expiry, parameter text) and is part
+of the state root. The original created one with `newpso`, a local test command
+that changed one node's file; that is not ported. A PSO is created and removed
+by two signed order types that a proposer mines into a block:
+
+* `NEWPSO`: `Reference` is the mode (a decimal 1..65535), `Params` the parameter
+  text, `Receiver` the word `null`, no amount, the custom-order fee. Applied in
+  block processing with the `AddNewPSO` semantics of the original: owner is the
+  sender, hash is the identity hash of owner, params and mode, expiry is the
+  number of the block the order extends plus 2016 (`MyLastBlock + 2016` of the
+  node that builds the block, which is a fact of the chain).
+* `CLRPSO`: removes the PSOs of the sender, and only those. Same fee.
+
+The params are signed with the rest of the order and carried in the block
+trailer. Hard limits: 255 bytes, 16 `label:value` items, a label of up to 8
+letters, digits or `_`, a value of up to 64 letters, digits, `.`, `_`, `-`, no
+space or `$` (`types.ValidPSOParams`); 100 PSO orders per block and 32 live PSOs
+per owner. The same rules run in the pool, in the builder and in the block
+validator (`applyOrder`), so builder, followers and replay agree. A PSO whose
+expiry block is reached is removed in the same step that expires masternode
+locks (`persistDerived`); a negative expiry in an old file never expires. The
+undo snapshots hold `psos.dat`, so a reorganisation takes a PSO back with its
+block (and the order returns to the pool). Tests: `TestPSOOrderMinedOnTwoNodesSameStateRoot`,
+`TestPSOUndoneByReorgAndMinedAgain`, `TestClearPSOsRemovesOnlyTheSendersOwn`,
+`TestPSOParamsLimits`, `TestPSOParamsAreSigned`, `TestPSOExpiryAndOwnerLimit`.
 
 ## Order lookup
 

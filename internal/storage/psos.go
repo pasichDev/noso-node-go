@@ -20,8 +20,8 @@ const PSOHdrBytes = 12
 // MNsLockExpireLapse is nosopsos.pas:67.
 const MNsLockExpireLapse = 2016
 
-// PSO is TPSOData. Only the file format is consensus relevant: no live
-// code path of the node creates PSOs besides AddNewPSO.
+// PSO is TPSOData. A PSO is created by a NEWPSO order in a block (AddNew) and
+// removed by CLRPSO or by its expiry; both are applied in block processing.
 type PSO struct {
 	Mode    uint16
 	Hash    string
@@ -302,6 +302,54 @@ func (p *PSOs) AddNew(mode int, owner string, expire int, params string) {
 	p.psos = append(p.psos, PSO{Mode: uint16(mode), Owner: owner, Expire: int32(expire),
 		Hash:   crypto.IDHash(owner + params + codec.IntToStr(int64(mode))),
 		Params: params})
+}
+
+// CountOwner is the number of live PSOs of owner.
+func (p *PSOs) CountOwner(owner string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := 0
+	for _, r := range p.psos {
+		if r.Owner == owner {
+			n++
+		}
+	}
+	return n
+}
+
+// ClearOwner removes every PSO of owner and returns how many there were.
+func (p *PSOs) ClearOwner(owner string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := p.psos[:0]
+	removed := 0
+	for _, r := range p.psos {
+		if r.Owner == owner {
+			removed++
+			continue
+		}
+		out = append(out, r)
+	}
+	p.psos = out
+	return removed
+}
+
+// ClearExpiredPSOs removes the PSOs whose expiry block has been reached. A
+// negative expiry (the DWord FFFFFFFF of an old file) never expires.
+func (p *PSOs) ClearExpiredPSOs(block int) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := p.psos[:0]
+	removed := 0
+	for _, r := range p.psos {
+		if r.Expire >= 0 && int(r.Expire) <= block {
+			removed++
+			continue
+		}
+		out = append(out, r)
+	}
+	p.psos = out
+	return removed
 }
 
 // All returns a copy of the PSO list (GetPSOsCopy).

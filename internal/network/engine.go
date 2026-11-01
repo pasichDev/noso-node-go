@@ -468,7 +468,7 @@ func (e *Engine) lineBudget(slot int, line string) bool {
 	now := e.now()
 	log, limit := e.lineLog, 200
 	switch codec.ASCIIUpper(codec.Parameter(line, 4)) {
-	case "$MNREPO", "ORDER", "$CUSTOM", "$SNDGVT":
+	case "$MNREPO", "ORDER", "$CUSTOM", "$SNDGVT", "$NEWPSO", "$CLRPSO":
 		log, limit = e.bulkLog, bulkLines
 	}
 	e.limMu.Lock()

@@ -34,7 +34,7 @@ prints the exact set.
 | Config | `nosocfg`, `setmode`, `addnode`, `delnode`, `addpool`, `delpool`, `addnosopay`, `delnosopay`, `restorecfg`, `clearcfg n`, `getreposeeds`, `forcereposeeds`, `directive text` |
 | RPC | `rpcon`, `rpcoff`, `setrpcport port` |
 | Maintenance | `undoblock`, `rebuildsum`, `zipsumary`, `restoresumary`, `restoreblockchain confirm` (deletes the chain and everything derived from it; only in a program that can restart the node, i.e. `nosod`), `testhead` |
-| PSO | `listpsos`, `showpsos` (`newpso`, `clearpsos` were removed) |
+| PSO | `listpsos`, `showpsos`, `newpso`, `clearpsos` (these two sign an order, see below) |
 | Other | `tp`, `post`, `clear`, `closestarton`, `closestartoff`, `setport`, `showpending` |
 | Not supported | `update`, `getbeta`, `checkupdates`, `sendreport`, `testnet` (see port-status) |
 
@@ -56,10 +56,19 @@ wallet passphrase as proof (`NOSO_WALLET_PASSPHRASE` or `-wallet-pass-file` for
 `nosocli`): any process of your user can reach the socket. Offline, with the
 node stopped, the passphrase opened the wallet already.
 
-**Not commands any more.** `newpso` and `clearpsos` changed the PSO file of one
-node only, which then refused the next block (the PSO file is in the state
-root); blocks carry no PSO, so none can be created and the commands answer
-with that reason. `restorecfg` restores the
+**PSOs.** `newpso [mode] [params] [address]` and `clearpsos [address]` do not
+change the PSO file of the node. They sign an order (`NEWPSO`, `CLRPSO`), admit
+it to the pool like any other order and announce it; a proposer mines it, and
+the PSO exists, or is removed, on every node when the block is applied.
+`newpso` without arguments sends the test PSO of the original command (mode 1,
+parameters `1:<time>;2:<last block>;3:1;4:500;5:2016;`) for the first wallet
+address. The mode is a number from 1 to 65535; the parameters are
+`label:value` pairs separated by `;` (a label of up to 8 letters, digits or `_`,
+a value of up to 64 letters, digits, `.`, `_` or `-`; at most 16 pairs and 255
+characters; no space). Each order pays the custom-order fee, and an address may
+hold 32 PSOs. `clearpsos` removes only the PSOs of the address that signs it.
+The command prints the order id; `listpsos` shows the PSO after the block.
+`restorecfg` restores the
 defaults but keeps the seed list; `restorecfg seeds` resets that too (this
 build has no default seeds, the node then has no peers). `customize` checks
 the real balance of the address. `sendgvt n dest` signs the canonical number

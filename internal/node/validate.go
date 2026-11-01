@@ -33,7 +33,7 @@ func bad(format string, a ...any) error {
 // against the previous block.
 func (n *Node) checkOrder(o types.Order, prev types.BlockHeader, blockTime int64) error {
 	switch o.OrderType {
-	case "TRFR", "CUSTOM", "SNDGVT":
+	case "TRFR", "CUSTOM", "SNDGVT", PSONew, PSOClear:
 	default:
 		return fmt.Errorf("order type %q", o.OrderType)
 	}
@@ -63,6 +63,10 @@ func (n *Node) checkOrder(o types.Order, prev types.BlockHeader, blockTime int64
 	case "CUSTOM":
 		if o.AmmountFee != consensus.GetCustFee(prev.Number+1) || o.AmmountTrf != 0 || !ValidAlias(o.Receiver) {
 			return errors.New("custom order")
+		}
+	case PSONew, PSOClear:
+		if !psoShape(o, consensus.GetCustFee(prev.Number+1)) {
+			return errors.New("pso order")
 		}
 	case "SNDGVT":
 		if _, ok := gvtNumber(o.Reference); !ok || o.AmmountFee != consensus.GetCustFee(prev.Number+1) ||
@@ -154,7 +158,7 @@ func (n *Node) ValidateBlock(b *storage.Block, prev types.BlockHeader, prevHash 
 	}
 	seen := map[string]bool{}
 	var fees int64
-	var transfers, gvts int
+	var transfers, gvts, psos int
 	for i, o := range user {
 		if int64(o.Block) != h.Number {
 			return bad("order %d block field", i)
@@ -174,9 +178,12 @@ func (n *Node) ValidateBlock(b *storage.Block, prev types.BlockHeader, prevHash 
 		if b.Keys[i] == "" {
 			return bad("order %d has no key", i)
 		}
-		if o.OrderType == "SNDGVT" {
+		switch o.OrderType {
+		case "SNDGVT":
 			gvts++
-		} else {
+		case PSONew, PSOClear:
+			psos++
+		default:
 			transfers++
 		}
 		var ok bool
@@ -187,8 +194,8 @@ func (n *Node) ValidateBlock(b *storage.Block, prev types.BlockHeader, prevHash 
 	if err := checkOrderGroups(user); err != nil {
 		return err
 	}
-	if transfers > consensus.MaxTransfersPerBlock || gvts > consensus.MaxGVTPerBlock {
-		return bad("too many orders (%d transfers, %d gvt)", transfers, gvts)
+	if transfers > consensus.MaxTransfersPerBlock || gvts > consensus.MaxGVTPerBlock || psos > consensus.MaxPSOPerBlock {
+		return bad("too many orders (%d transfers, %d gvt, %d pso)", transfers, gvts, psos)
 	}
 	if hasDev && b.Keys[len(b.Keys)-1] != "" {
 		return bad("project payment carries a key")

@@ -151,8 +151,8 @@ Go locations are in `internal/` unless noted.
 
 Every command of the dispatch table exists, except these which were
 removed: `update`, `getbeta`, `checkupdates`, `sendreport`, `testnet`
-(security, C-08 and M-02). `clear`, `setport`, `showpending` and `clearpsos` keep their
-original (no-op or "deprecated") behaviour `newpso` and `clearpsos` were removed: they changed the PSO file of one node only, and no block carries a PSO, so none can be created (`newpso` answers with that reason). `expkeys` prints the keys (the original copies them to the clipboard). `restart` works in nosod (in-process reopen); the GUI answers that it cannot restart. `TestEveryOriginalCommandHasAHandler`
+(security, C-08 and M-02). `clear`, `setport` and `showpending` keep their
+original (no-op or "deprecated") behaviour. `newpso` and `clearpsos` are changed: they sign a `NEWPSO` / `CLRPSO` order that a block carries (the original changed one node's file), see `docs/consensus.md`. `expkeys` prints the keys (the original copies them to the clipboard). `restart` works in nosod (in-process reopen); the GUI answers that it cannot restart. `TestEveryOriginalCommandHasAHandler`
 checks the list.
 
 ## GUI (`cmd/nosogui`, Fyne, build tag `gui`)

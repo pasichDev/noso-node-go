@@ -18,7 +18,7 @@ import (
 const ValidProtocolCommands = "$PING$PONG$GETPENDING$NEWBL$GETRESUMEN$LASTBLOCK$GETCHECKS" +
 	"$CUSTOMORDERADMINMSGNETREQ$REPORTNODE$GETMNS$BESTHASH$MNREPO$MNCHECK" +
 	"GETMNSFILEMNFILEGETHEADUPDATE$GETSUMARY$GETGVTSGVTSFILE$SNDGVTGETCFGDATA" +
-	"SETCFGDATA$GETPSOSPSOSFILE"
+	"SETCFGDATA$GETPSOSPSOSFILE$NEWPSO$CLRPSO"
 
 // IsValidProtocol mirrors nosonetwork.pas:379-383.
 func IsValidProtocol(line string) bool {
@@ -195,6 +195,9 @@ func (e *Engine) handleIncoming(c *Conn) {
 		return
 	case "NSLCUSTOM":
 		closeWith(c, codec.IntToStr(int64(n.PTCCustom(codec.GetOpData(line)))))
+		return
+	case "NSLPSO":
+		closeWith(c, codec.IntToStr(int64(n.PTCPSO(codec.GetOpData(line)))))
 		return
 	case "NSLSENDGVT":
 		closeWith(c, codec.IntToStr(int64(n.PTCSendGVT(codec.GetOpData(line)))))
@@ -549,6 +552,12 @@ func (e *Engine) ParseProtocolLines() {
 				} else {
 					e.spammer(sl, peer.IP)
 				}
+			case cmd == "$NEWPSO", cmd == "$CLRPSO":
+				if e.AddIPControl(peer.IP) < 100 {
+					n.PTCPSO(codec.GetOpData(line))
+				} else {
+					e.spammer(sl, peer.IP)
+				}
 			case cmd == "ORDER":
 				if e.AddIPControl(peer.IP) < 100 {
 					if !n.OrderIDAlreadyProcessed(line) {
@@ -621,7 +630,7 @@ func (e *Engine) SendPendings(sl int) {
 	for _, o := range n.PendingCopy() {
 		text := stringFromOrder(o)
 		switch o.OrderType {
-		case "CUSTOM", "SNDGVT":
+		case "CUSTOM", "SNDGVT", node.PSONew, node.PSOClear:
 			e.TextToSlot(sl, enc+"$"+text)
 		case "TRFR":
 			if o.TrxLine == 1 {

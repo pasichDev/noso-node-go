@@ -26,17 +26,22 @@ func TestRestoreCFGKeepsSeeds(t *testing.T) {
 	}
 }
 
-// newpso and clearpsos changed the state root of one node only; they are gone.
-func TestPSOCommandsDoNotTouchTheState(t *testing.T) {
-	d := newDisp(t, false)
+// newpso and clearpsos sign an order; they never write psos.dat themselves. A
+// wallet without funds cannot pay the order's fee, so it is refused and the
+// file stays as it was.
+func TestPSOCommandsSubmitOrdersOnly(t *testing.T) {
+	d := newDisp(t, true)
 	before := d.N.PSOs.FileHash()
 	for _, c := range []string{"newpso", "clearpsos"} {
 		out := strings.Join(d.Run(c), "\n")
-		if !(strings.Contains(out, "removed") || strings.Contains(out, "blocks")) {
+		if !strings.Contains(out, "refused") {
 			t.Errorf("%s: %q", c, out)
 		}
 	}
 	if d.N.PSOs.FileHash() != before {
 		t.Fatal("a PSO command changed the PSO file")
+	}
+	if d.N.PendingCount() != 0 {
+		t.Fatal("an unfunded PSO order entered the pool")
 	}
 }

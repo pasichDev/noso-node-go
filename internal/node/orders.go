@@ -19,7 +19,7 @@ import (
 func OrderFields(o types.Order, origin string) []string {
 	return []string{o.OrderType, codec.IntToStr(o.TimeStamp), origin, o.Receiver,
 		codec.IntToStr(o.AmmountTrf), codec.IntToStr(o.AmmountFee), codec.IntToStr(int64(o.TrxLine)), o.Reference,
-		codec.IntToStr(int64(o.OrderLines))}
+		codec.IntToStr(int64(o.OrderLines)), o.Params}
 }
 
 // OrderTrfrID derives the transfer id from all signed fields. FIX(C-04): in

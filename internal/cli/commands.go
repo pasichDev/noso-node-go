@@ -463,10 +463,10 @@ func init() {
 		},
 
 		// PSOs
-		// FIX(GAP-5): the PSO file is part of the state root. Adding or clearing
-		// an entry on one node made it refuse the next block of the chain, and
-		// no order can create one, so these local test commands are gone.
-		"NEWPSO": removedPSOCommand,
+		// FIX(GAP-5): the PSO file is part of the state root, so a PSO is never
+		// changed on one node. newpso and clearpsos sign an order, which a
+		// proposer mines into a block; every node applies it there.
+		"NEWPSO": cmdNewPSO,
 		"LISTPSOS": func(d *Dispatcher, l string) {
 			h := d.N.PSOs.Header()
 			d.log("PSOSs list")
@@ -477,7 +477,7 @@ func init() {
 				d.log("%d,%s,%s,%d,%s", x.Mode, x.Hash, x.Owner, x.Expire, x.Params)
 			}
 		},
-		"CLEARPSOS": removedPSOCommand,
+		"CLEARPSOS": cmdClearPSOs,
 		"SHOWPSOS": func(d *Dispatcher, l string) {
 			for i := 0; i < d.N.PSOs.LockedCount(); i++ {
 				m := d.N.PSOs.LockedAt(i)
@@ -526,9 +526,48 @@ func cmdSendTo(d *Dispatcher, l string) {
 	}
 }
 
-func removedPSOCommand(d *Dispatcher, l string) {
-	d.fail("%s was removed: PSOs belong to the consensus state, so changing them on one node only makes it reject the next block. "+
-		"Blocks carry no PSO, so none can be created; listpsos and showpsos show them.", strings.ToLower(p(l, 0)))
+// cmdNewPSO: newpso [mode] [params] [address]. Without arguments it sends the
+// test PSO of the original command (mode 1, the time, the last block, action 1,
+// fee 500, duration 2016) for the first wallet address. The PSO exists once a
+// block holds the order.
+func cmdNewPSO(d *Dispatcher, l string) {
+	if !d.needNet() {
+		return
+	}
+	mode, params, addr := int64(1), "", p(l, 3)
+	if m := p(l, 1); m != "" {
+		v, ok := codec.StrToInt64(m)
+		if !ok || v < 1 || v > 65535 {
+			d.fail("Syntax: newpso [mode 1..65535] [params label:value;...] [address]")
+			return
+		}
+		mode = v
+	}
+	params = p(l, 2)
+	if params == "" {
+		params = "1:" + d.N.UTCTimeStr() + ";2:" + codec.IntToStr(d.N.MyLastBlock()) + ";3:1;4:500;5:2016;"
+	}
+	if addr == "" {
+		addr = d.N.Wallet.At(0).Hash
+	}
+	if !d.E.NewPSO(addr, int(mode), params, d.printer()) {
+		d.failed = true
+	}
+}
+
+// cmdClearPSOs: clearpsos [address] removes the PSOs of an address of this
+// wallet (the first by default) with a signed order; other owners' PSOs stay.
+func cmdClearPSOs(d *Dispatcher, l string) {
+	if !d.needNet() {
+		return
+	}
+	addr := p(l, 1)
+	if addr == "" {
+		addr = d.N.Wallet.At(0).Hash
+	}
+	if !d.E.ClearPSOs(addr, d.printer()) {
+		d.failed = true
+	}
 }
 
 func skipped(why string) func(d *Dispatcher, l string) {

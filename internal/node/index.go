@@ -89,11 +89,3 @@ func (n *Node) RefreshWalletBalances() {
 		n.Wallet.SetBalance(w.Hash, n.Summary.BalanceIndexed(w.Hash))
 	}
 }
-
-// ErrPSOByBlockOnly is the answer to a request to create a PSO outside a block.
-var ErrPSOByBlockOnly = nodeError("PSOs are part of the consensus state and change only through blocks; this chain's blocks carry no PSO, so none can be created")
-
-// NewPSO is what the `newpso` command calls. It never writes psos.dat: that
-// file is in the state root, and a local change makes the node refuse the next
-// block. Until blocks can carry PSOs it only reports why nothing was done.
-func (n *Node) NewPSO() error { return ErrPSOByBlockOnly }

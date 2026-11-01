@@ -114,7 +114,7 @@ Status of the final audit's findings and of the consensus, operator and complete
 | operator (critical) | A node that never builds keeps every relayed order | Fixed: every accepted or built block prunes the pool. `TestFinal_FollowerPrunesMinedOrders` |
 | completeness GAP-1 | Mined orders not found | Fixed: indexed at commit, rolled back on reorganisation. `TestFinal_MinedOrdersAreIndexed`, `TestFinal_ReorgRollsBackOrderIndex` |
 | completeness GAP-2 | No GVT on a new chain | Fixed: created by block 1 for its sealer. `TestFinal_FirstBlockCreatesTheGVTs`, `TestFinal_SendGVTReferenceIsCanonical` |
-| completeness GAP-3 (b), GAP-4, GAP-5 | `sendgvt` reference, wallet balance, `newpso` | Node side fixed (`SendGVT` reference, `RefreshWalletBalances`, `NewPSO`); the commands live in the network and cli packages |
+| completeness GAP-3 (b), GAP-4, GAP-5 | `sendgvt` reference, wallet balance, `newpso` | Node side fixed (`SendGVT` reference, `RefreshWalletBalances`); `newpso` / `clearpsos` now sign orders that blocks carry (`NEWPSO`, `CLRPSO`, `docs/consensus.md`), tests `TestPSOOrderMinedOnTwoNodesSameStateRoot`, `TestPSOUndoneByReorgAndMinedAgain` (written, not run) |
 
 ## Scope
 

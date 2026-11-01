@@ -231,6 +231,10 @@ const MaxMasternodesPerBlock = 5000
 const (
 	MaxTransfersPerBlock = 2000
 	MaxGVTPerBlock       = 100
+	// MaxPSOPerBlock bounds the PSO orders (NEWPSO, CLRPSO) of one block.
+	MaxPSOPerBlock = 100
+	// MaxPSOPerOwner bounds the live PSOs of one address.
+	MaxPSOPerOwner = 32
 )
 
 // Shares splits one block: the project payment (from PoSBlockEnd), the

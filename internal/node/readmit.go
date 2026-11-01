@@ -143,6 +143,8 @@ func (n *Node) admitAgain(group []types.Order) bool {
 		return n.ptcCustom("$"+types.StringFromOrder(group[0]), false) == 0
 	case "SNDGVT":
 		return n.ptcSendGVT("$"+types.StringFromOrder(group[0]), false) == 0
+	case PSONew, PSOClear:
+		return n.ptcPSO("$"+types.StringFromOrder(group[0]), false) == 0
 	}
 	return false
 }

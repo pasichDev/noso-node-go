@@ -144,7 +144,11 @@ type Order struct {
 	AmmountTrf int64
 	Signature  string // String[120]
 	TrfrID     string // String[64]
-	raw        []byte // stale ShortString tails, see Summary
+	// Params is the parameter text of a PSO order (NEWPSO). It is not part of
+	// the 562-byte record: blocks carry it in their trailer, the wire in an
+	// extra field, and the signature covers it.
+	Params string
+	raw    []byte // stale ShortString tails, see Summary
 }
 
 // AssignSender sets Sender the way a Pascal assignment to the packed record
