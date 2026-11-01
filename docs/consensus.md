@@ -252,7 +252,7 @@ console commands `undoblock`, `rebuildsum` and `completesum`.
 The pool follows the chain on every node, builder or not: each accepted or
 built block removes the orders it holds and every order too old for the next
 block (`pruneMined`), and the pool holds at most `MaxPoolLines` (6000) lines. A
-full pool refuses a new order; it never evicts an admitted one. That removes
+full pool refuses a new order; an order is admitted when it is dated no more than `OrderClockTolerance` (60 s) ahead of the node's clock (it used to be bounded by the tip's end, which refused everything while a proposer was down; block validation bounds an order by the time of its block and never used this); it never evicts an admitted one. That removes
 free censorship, not paid censorship: a user with funds can fill the pool with
 valid orders dated at the start of a period; about 2000 are mined (their fees go
 to the proposer) and the rest are dropped unpaid at the next block, so honest
@@ -313,15 +313,16 @@ old rules (blocks without a trailer, with the M-11 fix; known gaps: the
 legacy replay does not touch masternode locks, and a peer's block without a
 trailer is refused, so a migrated chain can only be copied as a data directory,
 not synchronised from genesis). A block that cannot be replayed is removed with
-everything after it and the files restored; below the finality horizon this is
-refused (the guard is 20 blocks below the highest tip this node reached), the
+everything after it and the files restored; inside the local guard (20 blocks
+below the highest tip this node reached; it protects the node's own files and is
+not a finality of the chain) this is refused, the
 node is marked corrupt (`ErrCorrupt`) and stops replaying. A chain born here
 whose block no longer decodes as a sealed block is a replay failure, never
 replayed by the lenient rules of the old network; and a start finds a tip file
 that is not the block the headers file recorded.
 `RebuildSummary` restores the previous files and returns the error when a
 block does not apply. `UndoLastBlock` restores the snapshot taken before the
-last block and refuses to go below the horizon.
+last block and refuses to go below the local guard.
 
 ## Synchronisation
 
