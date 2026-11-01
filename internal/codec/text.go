@@ -161,7 +161,7 @@ func Trim(s string) string {
 // is kept as it is.
 func ASCIIUpper(s string) string {
 	i := 0
-	for i < len(s) && !(s[i] >= 'a' && s[i] <= 'z') {
+	for i < len(s) && (s[i] < 'a' || s[i] > 'z') {
 		i++
 	}
 	if i == len(s) {

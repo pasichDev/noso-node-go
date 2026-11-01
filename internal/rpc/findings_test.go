@@ -99,7 +99,7 @@ func TestStopWaitsForRequestsInFlight(t *testing.T) {
 	go func() {
 		resp, err := http.Get("http://" + ln.Addr().String() + "/")
 		if err == nil {
-			resp.Body.Close()
+			_ = resp.Body.Close() // the answer is not used
 		}
 	}()
 	<-started

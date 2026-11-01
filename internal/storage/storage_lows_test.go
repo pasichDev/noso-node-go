@@ -42,7 +42,9 @@ func TestHeadersAddOverwritesPartialRecord(t *testing.T) {
 	}
 	f, _ := os.OpenFile(l.Headers, os.O_WRONLY|os.O_APPEND, 0)
 	_, _ = f.Write([]byte("junk!")) // 75 bytes now
-	f.Close()
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if !h.Add(2, "B2", "S2") {
 		t.Fatal("add 2")
 	}

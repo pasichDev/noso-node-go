@@ -19,12 +19,12 @@ func runInit(t *testing.T, args ...string) (int, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer out.Close()
+	defer func() { _ = out.Close() }() // test cleanup
 	errf, err := os.CreateTemp(t.TempDir(), "err")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer errf.Close()
+	defer func() { _ = errf.Close() }() // test cleanup
 	rc := initNetwork(args, out, errf)
 	a, _ := os.ReadFile(out.Name())
 	b, _ := os.ReadFile(errf.Name())

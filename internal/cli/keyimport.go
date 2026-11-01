@@ -36,7 +36,7 @@ func PrepareKeyImport(line string, stdin io.Reader) (string, error) {
 		if err != nil {
 			return "", errors.New(usage)
 		}
-		defer fh.Close()
+		defer func() { _ = fh.Close() }() // read only
 		src = fh
 	}
 	raw, err := io.ReadAll(io.LimitReader(src, 4096))

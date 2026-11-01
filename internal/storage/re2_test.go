@@ -54,7 +54,9 @@ func TestRE2TornPlainWalletFails(t *testing.T) {
 	p := filepath.Join(d, "wallet.pkw")
 	good := tPKW(tRec(), tRec(), tRec())
 	torn := good[:300]
-	os.WriteFile(p, torn, 0o600)
+	if err := os.WriteFile(p, torn, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if w, err := OpenWalletFor(p, nil, true, WalletOpenOptions{}); err == nil {
 		t.Fatalf("torn wallet.pkw opened (Len=%d)", w.Len())
 	}
@@ -68,8 +70,12 @@ func TestRE2TornPlainWalletRestoredFromBak(t *testing.T) {
 	d := t.TempDir()
 	p := filepath.Join(d, "wallet.pkw")
 	good := tPKW(tRec(), tRec(), tRec())
-	os.WriteFile(p+".bak", good, 0o600)
-	os.WriteFile(p, good[:300], 0o600)
+	if err := os.WriteFile(p+".bak", good, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, good[:300], 0o600); err != nil {
+		t.Fatal(err)
+	}
 	w, err := OpenWalletFor(p, nil, true, WalletOpenOptions{})
 	if err != nil || w.Len() != 3 {
 		t.Fatalf("restore from .bak: err=%v", err)
@@ -91,8 +97,12 @@ func TestRE2UnreadablePlainWalletFails(t *testing.T) {
 	d := t.TempDir()
 	p := filepath.Join(d, "wallet.pkw")
 	good := tPKW(tRec(), tRec())
-	os.WriteFile(p+".bak", good, 0o600)
-	os.WriteFile(p, good, 0o000)
+	if err := os.WriteFile(p+".bak", good, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, good, 0o000); err != nil {
+		t.Fatal(err)
+	}
 	w, err := OpenWalletFor(p, nil, true, WalletOpenOptions{})
 	if err == nil {
 		t.Fatalf("unreadable wallet.pkw opened as Len=%d", w.Len())
@@ -108,7 +118,9 @@ func TestRE2KeptPkwDoesNotOverrideNewerEncBak(t *testing.T) {
 	d := t.TempDir()
 	p := filepath.Join(d, "wallet.pkw")
 	pass := []byte("correct horse")
-	os.WriteFile(p, tPKW(tRec()), 0o600)
+	if err := os.WriteFile(p, tPKW(tRec()), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	w, err := OpenWalletFor(p, pass, false, WalletOpenOptions{})
 	if err != nil {
 		t.Fatal(err)
@@ -117,7 +129,7 @@ func TestRE2KeptPkwDoesNotOverrideNewerEncBak(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	os.Remove(filepath.Join(d, "wallet.enc"))
+	_ = os.Remove(filepath.Join(d, "wallet.enc")) // the file may already be gone
 	w2, err := OpenWalletFor(p, pass, false, WalletOpenOptions{})
 	if err != nil {
 		t.Fatal(err)
@@ -139,7 +151,9 @@ func TestRE2InsecurePlainRefusesEncBak(t *testing.T) {
 	d := t.TempDir()
 	p := filepath.Join(d, "wallet.pkw")
 	s, _ := sealWallet(tPKW(tRec(), tRec()), []byte("pw"))
-	os.WriteFile(filepath.Join(d, "wallet.enc.bak"), s, 0o600)
+	if err := os.WriteFile(filepath.Join(d, "wallet.enc.bak"), s, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := OpenWalletFor(p, nil, true, WalletOpenOptions{}); err == nil {
 		t.Fatal("started a new plain wallet next to wallet.enc.bak")
 	}
@@ -153,7 +167,9 @@ func TestRE2BackupNotOverwrittenBySmallerData(t *testing.T) {
 	d := t.TempDir()
 	p := filepath.Join(d, "wallet.pkw")
 	big := tPKW(tRec(), tRec(), tRec())
-	os.WriteFile(p+".bak", big, 0o600)
+	if err := os.WriteFile(p+".bak", big, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	w := &Wallet{path: p}
 	w.Insert(tRec())
 	if err := w.SaveErr(); err != nil {
@@ -175,8 +191,10 @@ func TestRE2BackupNotOverwrittenBySmallerData(t *testing.T) {
 func TestRE2CreateNewReportsSaveFailure(t *testing.T) {
 	skipIfRoot(t)
 	d := t.TempDir()
-	os.Chmod(d, 0o500)
-	defer os.Chmod(d, 0o700)
+	if err := os.Chmod(d, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chmod(d, 0o700) }() // restore the mode so the temporary directory can be removed
 	if w, err := OpenWalletFor(filepath.Join(d, "wallet.pkw"), nil, true, WalletOpenOptions{}); err == nil {
 		t.Fatalf("handed out %s that is not on disk", w.At(0).Hash)
 	}
@@ -188,15 +206,21 @@ func TestRE2RetireChecksBak(t *testing.T) {
 	p := filepath.Join(d, "wallet.pkw")
 	a, b := tRec(), tRec()
 	_ = b
-	os.WriteFile(p, tPKW(a), 0o600)
-	os.WriteFile(p+".bak", tPKW(a, b), 0o600)
+	if err := os.WriteFile(p, tPKW(a), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p+".bak", tPKW(a, b), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	pass := []byte("pw12345678")
 	if _, err := OpenWalletFor(p, pass, false, WalletOpenOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	// a key that appeared in the .bak after the migration and is not in wallet.enc
 	c := tRec()
-	os.WriteFile(p+".bak", tPKW(a, c), 0o600)
+	if err := os.WriteFile(p+".bak", tPKW(a, c), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := RetireLegacyWallet(p, pass); err == nil || !Exists(p+".bak") {
 		t.Fatalf("a .bak holding a key that wallet.enc lacks was shredded (err=%v)", err)
 	}
@@ -206,14 +230,20 @@ func TestRE2RetireReportsShredFailure(t *testing.T) {
 	skipIfRoot(t)
 	d := t.TempDir()
 	p := filepath.Join(d, "wallet.pkw")
-	os.WriteFile(p, tPKW(tRec()), 0o600)
+	if err := os.WriteFile(p, tPKW(tRec()), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	pass := []byte("pw12345678")
 	if _, err := OpenWalletFor(p, pass, false, WalletOpenOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	os.Chmod(p, 0o400)
-	os.Chmod(d, 0o500)
-	defer os.Chmod(d, 0o700)
+	if err := os.Chmod(p, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(d, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chmod(d, 0o700) }() // restore the mode so the temporary directory can be removed
 	if err := RetireLegacyWallet(p, pass); err == nil {
 		t.Fatal("retire reported success but the clear-text wallet is still there")
 	}
@@ -224,10 +254,18 @@ func TestRE2Permissions(t *testing.T) {
 	skipIfRoot(t)
 	d := t.TempDir()
 	p := filepath.Join(d, "wallet.pkw")
-	os.WriteFile(p, tPKW(tRec()), 0o644)
-	os.Chmod(p, 0o644)
-	os.WriteFile(p+".bak", tPKW(tRec()), 0o644)
-	os.Chmod(p+".bak", 0o644)
+	if err := os.WriteFile(p, tPKW(tRec()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(p, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p+".bak", tPKW(tRec()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(p+".bak", 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := OpenWalletFor(p, []byte("pw12345678"), false, WalletOpenOptions{}); err != nil {
 		t.Fatal(err)
 	}
@@ -237,8 +275,12 @@ func TestRE2Permissions(t *testing.T) {
 		}
 	}
 	adv := filepath.Join(d, "advopt.txt")
-	os.WriteFile(adv, nil, 0o644)
-	os.Chmod(adv, 0o644)
+	if err := os.WriteFile(adv, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(adv, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	o := DefaultOptions("x")
 	o.RPCSpendToken = "SECRET"
 	if err := o.Save(adv); err != nil {
@@ -259,16 +301,22 @@ func TestRE2OptionsBadLineKeepsKeys(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "advopt.txt")
 	o := DefaultOptions("x")
 	o.AdminKey, o.RPCSpendToken = "ADMIN", "TOK"
-	o.Save(p)
+	if err := o.Save(p); err != nil {
+		t.Fatal(err)
+	}
 	raw, _ := os.ReadFile(p)
-	os.WriteFile(p, append([]byte("HideEmpty maybe\n"), raw...), 0o600)
+	if err := os.WriteFile(p, append([]byte("HideEmpty maybe\n"), raw...), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	q := DefaultOptions("x")
 	if err := q.Load(p); err == nil {
 		t.Fatal("bad line not reported")
 	}
-	q.Save(p)
+	if err := q.Save(p); err != nil {
+		t.Fatal(err)
+	}
 	r := DefaultOptions("x")
-	r.Load(p)
+	_ = r.Load(p) // a partly bad file reports an error; the test checks what was kept
 	if r.AdminKey != "ADMIN" || r.RPCSpendToken != "TOK" {
 		t.Fatalf("keys blanked: %q %q", r.AdminKey, r.RPCSpendToken)
 	}
@@ -279,9 +327,13 @@ func TestRE2OptionsLongLineRefusesSave(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "advopt.txt")
 	o := DefaultOptions("x")
 	o.AdminKey = "ADMIN"
-	o.Save(p)
+	if err := o.Save(p); err != nil {
+		t.Fatal(err)
+	}
 	raw, _ := os.ReadFile(p)
-	os.WriteFile(p, append([]byte(strings.Repeat("A", 2<<20)+"\n"), raw...), 0o600)
+	if err := os.WriteFile(p, append([]byte(strings.Repeat("A", 2<<20)+"\n"), raw...), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	q := DefaultOptions("x")
 	if err := q.Load(p); err == nil {
 		t.Fatal("scanner error ignored")
@@ -290,7 +342,7 @@ func TestRE2OptionsLongLineRefusesSave(t *testing.T) {
 		t.Fatal("saved over a file that was only partly read")
 	}
 	r := DefaultOptions("x")
-	r.Load(p)
+	_ = r.Load(p) // a partly bad file reports an error; the test checks what was kept
 }
 
 // re2 #10: a torn blocks_db tail must not shift later records.
@@ -299,8 +351,10 @@ func TestRE2BlocksDBTornTail(t *testing.T) {
 	x := OpenBlocksDB(p)
 	x.Add(100, 1, 2, 3)
 	f, _ := os.OpenFile(p, os.O_WRONLY|os.O_APPEND, 0)
-	f.Write([]byte{0x65, 0, 0})
-	f.Close()
+	_, _ = f.Write([]byte{0x65, 0, 0})
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
 	x.Add(102, 7, 8, 9)
 	x.Add(103, 7, 8, 9)
 	y := OpenBlocksDB(p)
@@ -313,7 +367,9 @@ func TestRE2BlocksDBTornTail(t *testing.T) {
 func TestRE2CopyFileAtomic(t *testing.T) {
 	d := t.TempDir()
 	dst := filepath.Join(d, "b")
-	os.WriteFile(dst, []byte("live"), 0o600)
+	if err := os.WriteFile(dst, []byte("live"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := copyFile(filepath.Join(d, "missing"), dst); err == nil {
 		t.Fatal("missing source accepted")
 	}
@@ -321,13 +377,17 @@ func TestRE2CopyFileAtomic(t *testing.T) {
 		t.Fatal("dst damaged")
 	}
 	g := OpenGVTs(filepath.Join(d, "g"))
-	os.WriteFile(g.path, make([]byte, types.GVTSize*2), 0o600)
+	if err := os.WriteFile(g.path, make([]byte, types.GVTSize*2), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	g.Reload()
 	if err := g.RestoreBackup(); err == nil || !Exists(g.path) || g.Len() != 2 {
 		t.Fatalf("RestoreBackup without .bak: err=%v exists=%v Len=%d", err, Exists(g.path), g.Len())
 	}
-	os.WriteFile(g.path+".bak", []byte("old backup"), 0o600)
-	os.Remove(g.path)
+	if err := os.WriteFile(g.path+".bak", []byte("old backup"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Remove(g.path) // the file may already be gone
 	if err := g.Backup(); err == nil {
 		t.Fatal("backup of a missing file reported success")
 	}
@@ -342,8 +402,10 @@ func TestRE2WriteErrorsReported(t *testing.T) {
 	d := t.TempDir()
 	g := OpenGVTs(filepath.Join(d, "gvts.psk"))
 	ps := OpenPSOs(filepath.Join(d, "psos.dat"))
-	os.Chmod(d, 0o500)
-	defer os.Chmod(d, 0o700)
+	if err := os.Chmod(d, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chmod(d, 0o700) }() // restore the mode so the temporary directory can be removed
 	if err := g.Save(); err == nil {
 		t.Error("GVTs.Save dropped the error")
 	}
@@ -356,7 +418,9 @@ func TestRE2WriteErrorsReported(t *testing.T) {
 func TestRE2NoTmpLeftOnRenameFailure(t *testing.T) {
 	d := t.TempDir()
 	p := filepath.Join(d, "x")
-	os.MkdirAll(filepath.Join(p, "sub"), 0o700) // rename onto a non-empty directory fails
+	if err := os.MkdirAll(filepath.Join(p, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	} // rename onto a non-empty directory fails
 	if err := writeFileAtomic(p, []byte("data")); err == nil {
 		t.Fatal("expected failure")
 	}
@@ -376,7 +440,9 @@ func TestRE2ImportChecksKeys(t *testing.T) {
 		t.Error("trailing bytes accepted")
 	}
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "bad.pkw"), a.Encode(), 0o600)
+	if err := os.WriteFile(filepath.Join(dir, "bad.pkw"), a.Encode(), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	w := &Wallet{path: filepath.Join(t.TempDir(), "wallet.pkw")}
 	if n := w.ImportFromBackup(dir); n != 0 {
 		t.Errorf("ImportFromBackup took %d records with a foreign key", n)
@@ -389,14 +455,18 @@ func TestFinalRetireRefusesATornTail(t *testing.T) {
 	d := t.TempDir()
 	p := filepath.Join(d, "wallet.pkw")
 	a, b := tRec(), tRec()
-	os.WriteFile(p, tPKW(a), 0o600)
+	if err := os.WriteFile(p, tPKW(a), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	pass := []byte("pw12345678")
 	if _, err := OpenWalletFor(p, pass, false, WalletOpenOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	// .bak: one whole record plus a torn tail that holds the whole key of b
 	torn := append(tPKW(a), tPKW(b)[:625]...)
-	os.WriteFile(p+".bak", torn, 0o600)
+	if err := os.WriteFile(p+".bak", torn, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := RetireLegacyWallet(p, pass); err == nil || !Exists(p+".bak") || !Exists(p) {
 		t.Fatalf("a file with an unparsed tail was shredded (err=%v)", err)
 	}
@@ -406,16 +476,22 @@ func TestFinalRetireCoversEveryCopyAndNeverFollowsLinks(t *testing.T) {
 	d := t.TempDir()
 	p := filepath.Join(d, "wallet.pkw")
 	a := tRec()
-	os.WriteFile(p, tPKW(a), 0o600)
+	if err := os.WriteFile(p, tPKW(a), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	pass := []byte("pw12345678")
 	if _, err := OpenWalletFor(p, pass, false, WalletOpenOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	rpc := filepath.Join(d, "SUMMARKS", "RPC")
-	os.MkdirAll(rpc, 0o700)
+	if err := os.MkdirAll(rpc, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	copies := []string{p + ".damaged-123", p + ".bak.456.old", filepath.Join(rpc, "x.pkw")}
 	for _, c := range copies {
-		os.WriteFile(c, tPKW(a), 0o600)
+		if err := os.WriteFile(c, tPKW(a), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	w, _ := OpenWalletFor(p, pass, false, WalletOpenOptions{})
 	if w.LegacyWarning() == "" {
@@ -423,7 +499,9 @@ func TestFinalRetireCoversEveryCopyAndNeverFollowsLinks(t *testing.T) {
 	}
 	// a link in place of a copy: refused, and its target is left alone
 	victim := filepath.Join(t.TempDir(), "victim")
-	os.WriteFile(victim, []byte("precious"), 0o600)
+	if err := os.WriteFile(victim, []byte("precious"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	link := filepath.Join(rpc, "link.pkw")
 	if err := os.Symlink(victim, link); err != nil {
 		t.Skip("no symlinks")
@@ -439,7 +517,7 @@ func TestFinalRetireCoversEveryCopyAndNeverFollowsLinks(t *testing.T) {
 			t.Fatalf("%s removed although the retire was refused", c)
 		}
 	}
-	os.Remove(link)
+	_ = os.Remove(link) // the file may already be gone
 	if err := RetireLegacyWallet(p, pass); err != nil {
 		t.Fatal(err)
 	}

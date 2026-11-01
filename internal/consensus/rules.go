@@ -201,7 +201,7 @@ func NextBlockTimeStamp(utc int64) int64 { return utc + 600 - utc%600 }
 // IsBlockOpen is false in the first 10 and last 15 seconds of a period.
 func IsBlockOpen(utc int64) bool {
 	a := BlockAge(utc)
-	return !(a < 10 || a > 585)
+	return a >= 10 && a <= 585
 }
 
 // ApplyBP returns amount*bps/10000 (truncating) without Int64 overflow; ok is

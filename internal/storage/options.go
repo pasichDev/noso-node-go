@@ -183,7 +183,7 @@ func (o *Options) Load(path string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // read only
 	if st, err := f.Stat(); err == nil && st.Mode().Perm()&0o077 != 0 {
 		_ = os.Chmod(path, 0o600)
 	}

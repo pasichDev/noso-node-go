@@ -42,7 +42,9 @@ func (b *bed) fastForward(height int64, fund []string, amounts []int64) {
 		n.UpdateMyData()
 		n.Summary.SetHash()
 		n.Headers.Add(height, n.MyLastBlockHash(), n.Summary.Hash())
-		n.PSOs.Save(int(height))
+		if err := n.PSOs.Save(int(height)); err != nil {
+			b.t.Fatal(err)
+		}
 		n.noteTip(height)
 	}
 	*b.now = timeEnd + 100

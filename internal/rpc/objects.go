@@ -67,7 +67,7 @@ func ObjectFromString(in string) (string, error) {
 			tr, ok3 := codec.StrToInt(p(6))
 			am, ok4 := codec.StrToInt64(p(8))
 			fe, ok5 := codec.StrToInt64(p(9))
-			if !(ok1 && ok2 && ok3 && ok4 && ok5) {
+			if !ok1 || !ok2 || !ok3 || !ok4 || !ok5 {
 				return "", errConv
 			}
 			o.str("orderid", p(2)).i64("timestamp", ts).i64("block", blk).str("type", p(5)).i64("trfrs", int64(tr)).

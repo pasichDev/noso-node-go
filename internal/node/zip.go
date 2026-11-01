@@ -99,7 +99,7 @@ func (n *Node) StageBlocks(data []byte) (int, error) {
 			return 0, err
 		}
 		raw, err := io.ReadAll(io.LimitReader(rc, maxZipEntrySize+1))
-		rc.Close()
+		_ = rc.Close() // read only
 		if err != nil || len(raw) > maxZipEntrySize {
 			return 0, errors.New("bad archive entry")
 		}

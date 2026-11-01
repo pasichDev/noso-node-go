@@ -29,10 +29,6 @@ func fundedNode(t *testing.T) (*Node, *int64, types.Wallet) {
 
 func destAddr() string { return crypto.GetAddressFromPublicKey(crypto.GenerateKeyPair().PublicKey, 0) }
 
-func orderLine(o types.Order, n int) string {
-	return "PSK 2 v 1 ORDER 1 $" + types.StringFromOrder(o)
-}
-
 // C-04: the TrfrID is derived from the signed fields, so a changed field or
 // a re-labelled id is rejected, and a transfer already mined is refused.
 func TestC04_TrfrIDBoundAndReplay(t *testing.T) {
@@ -169,7 +165,9 @@ func TestM14_GVTOwner(t *testing.T) {
 	n.GVTs.Reload()
 	// give GVT 5 to the wallet address
 	n.GVTs.ChangeOwner(5, n.GVTs.Index(5).Owner, w.Hash)
-	n.GVTs.Save()
+	if err := n.GVTs.Save(); err != nil {
+		t.Fatal(err)
+	}
 	o := types.Order{OrderLines: 1, OrderType: "SNDGVT", TimeStamp: *now - 30, Reference: "5", TrxLine: 1,
 		Sender: w.PublicKey, Address: w.Hash, Receiver: destAddr(), AmmountFee: consensus.GetCustFee(1)}
 	SignOrder(crypto.ChainID, &o, w.PrivateKey)
@@ -274,9 +272,11 @@ func zipOf(t *testing.T, files map[string][]byte) []byte {
 	zw := zip.NewWriter(&b)
 	for name, data := range files {
 		w, _ := zw.Create(name)
-		w.Write(data)
+		_, _ = w.Write(data)
 	}
-	zw.Close()
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
 	return b.Bytes()
 }
 
@@ -365,7 +365,7 @@ func TestH04_ReorgDepth(t *testing.T) {
 func TestM12_WriteFailureStopsBuild(t *testing.T) {
 	n, now, w := fundedNode(t)
 	_ = os.Chmod(n.Lay.BlockDir, 0o500)
-	defer os.Chmod(n.Lay.BlockDir, 0o755)
+	defer func() { _ = os.Chmod(n.Lay.BlockDir, 0o755) }() // restore the mode so the temporary directory can be removed
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores directory permissions")
 	}

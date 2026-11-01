@@ -215,8 +215,8 @@ func TestPendingConnectionsBounded(t *testing.T) {
 	e := NewEngine(mkNode(t, &ck))
 	for i := 0; i < maxPendingConns; i++ {
 		a, b := net.Pipe()
-		defer a.Close()
-		defer b.Close()
+		defer func() { _ = a.Close() }() // test cleanup
+		defer func() { _ = b.Close() }() // test cleanup
 		if !e.trackConn(NewConn(a)) {
 			t.Fatalf("refused connection %d", i)
 		}

@@ -441,7 +441,7 @@ func NetworkTimestamp(host string) int64 {
 	if err != nil {
 		return 0
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }() // a UDP socket after one exchange
 	req := make([]byte, 48)
 	req[0] = 0x1b // LI 0, VN 3, mode 3 (client)
 	_ = c.SetDeadline(time.Now().Add(500 * time.Millisecond))

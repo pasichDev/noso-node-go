@@ -60,20 +60,17 @@ type Engine struct {
 	// rate limits (function level `const` variables of the Pascal code)
 
 	// request throttles (nosonetwork.pas:155-167)
-	lastTimeRequestSumary, lastTimeRequestBlock, lastTimeRequestResumen int64
-	lastTimePendingRequested, lastTimeMNHashRequested                   int64
-	lastTimeMNsRequested, lastTimeChecksRequested                       int64
-	lastTimeGVTsRequest, lastTimePSOsRequest, lastRunMNVerification     int64
-	lastSyncWithMainnet, lastTimeReportMyMN, lastPing                   int64
-	forceCompleteHeadersDownload                                        bool
-	downloadHeaders, downloadSumary, downloadBlocks                     bool
-	downloadGVTs, downloadPSOs                                          bool
-	statusConnected                                                     bool
-	rebuildingSumary                                                    bool
-	buildNMSBlock                                                       int64
-	canBuild                                                            bool
-	mnsRandomWait                                                       int64
-	engineLastUpdate                                                    int64
+	lastTimePendingRequested, lastTimeMNHashRequested int64
+	lastTimeMNsRequested, lastTimeChecksRequested     int64
+	lastRunMNVerification                             int64
+	lastSyncWithMainnet, lastTimeReportMyMN, lastPing int64
+	forceCompleteHeadersDownload                      bool
+	statusConnected                                   bool
+	rebuildingSumary                                  bool
+	buildNMSBlock                                     int64
+	canBuild                                          bool
+	mnsRandomWait                                     int64
+	engineLastUpdate                                  int64
 
 	// MinPeers is the connection count that moves the node from state 1 to
 	// 2. It is 3 on the real network (mpred.pas:499); tests lower it.

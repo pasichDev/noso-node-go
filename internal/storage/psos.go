@@ -69,7 +69,7 @@ func (p *PSOs) Load() (errored bool) {
 		errored = !p.parse(raw)
 	}
 	if !Exists(p.path) || errored {
-		p.saveLocked(int(p.header.Block))
+		_ = p.saveLocked(int(p.header.Block)) // the error is kept in saveErr (SaveErr), as for every save
 	} else {
 		p.hash = crypto.IDHashFile(p.path)
 	}

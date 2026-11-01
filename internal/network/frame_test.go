@@ -14,7 +14,7 @@ func TestFraming(t *testing.T) {
 		_ = ca.WriteLine("PSK 2 0.4.4Ab9 1700000000 $PING 3")
 		_ = ca.WriteStream("RESUMENFILE", []byte("hello-bytes"))
 		_, _ = a.Write([]byte("bare-lf\nlast-no-eol"))
-		a.Close()
+		_ = a.Close() // test cleanup
 	}()
 	if l, err := cb.ReadLine(time.Second); err != nil || l != "PSK 2 0.4.4Ab9 1700000000 $PING 3" {
 		t.Fatalf("%q %v", l, err)
@@ -55,7 +55,7 @@ func FuzzReadLine(f *testing.F) {
 	f.Add([]byte("abc\r\ndef\n"))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		a, b := net.Pipe()
-		go func() { _, _ = a.Write(data); a.Close() }()
+		go func() { _, _ = a.Write(data); _ = a.Close() }()
 		c := NewConn(b)
 		for i := 0; i < 8; i++ {
 			if _, err := c.ReadLine(50 * time.Millisecond); err != nil {
@@ -96,8 +96,8 @@ func TestWriteStreamGivesUpOnAReaderThatTakesNothing(t *testing.T) {
 	defer func() { streamStall, streamTotal = oldStall, oldTotal }()
 
 	a, b := net.Pipe()
-	defer a.Close()
-	defer b.Close()
+	defer func() { _ = a.Close() }() // test cleanup
+	defer func() { _ = b.Close() }() // test cleanup
 	done := make(chan error, 1)
 	go func() { done <- NewConn(a).WriteStream("FILE", make([]byte, 1<<20)) }()
 	select {
@@ -110,8 +110,8 @@ func TestWriteStreamGivesUpOnAReaderThatTakesNothing(t *testing.T) {
 	}
 
 	c, d := net.Pipe()
-	defer c.Close()
-	defer d.Close()
+	defer func() { _ = c.Close() }() // test cleanup
+	defer func() { _ = d.Close() }() // test cleanup
 	go func() { _, _ = io.Copy(io.Discard, d) }()
 	if err := NewConn(c).WriteStream("FILE", make([]byte, 1<<20)); err != nil {
 		t.Fatalf("a reading peer was cut off: %v", err)

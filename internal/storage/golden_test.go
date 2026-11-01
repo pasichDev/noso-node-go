@@ -174,7 +174,9 @@ func TestGoldenPSOs(t *testing.T) {
 		t.Fatalf("expire %d", p.psos[0].Expire)
 	}
 	// saving reproduces the file, padding bytes included
-	p.Save(48500)
+	if err := p.Save(48500); err != nil {
+		t.Fatal(err)
+	}
 	got, _ := os.ReadFile(l.PSOs)
 	if !bytes.Equal(got, raw) {
 		t.Fatalf("psos.dat changed on save\n% x\n% x", got, raw)

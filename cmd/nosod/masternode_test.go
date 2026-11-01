@@ -201,7 +201,7 @@ func copyTree(src, dst string) error {
 		if err != nil {
 			return err
 		}
-		defer in.Close()
+		defer func() { _ = in.Close() }() // test cleanup
 		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 			return err
 		}
@@ -210,7 +210,7 @@ func copyTree(src, dst string) error {
 			return err
 		}
 		if _, err := io.Copy(out, in); err != nil {
-			out.Close()
+			_ = out.Close() // test cleanup
 			return err
 		}
 		return out.Close()

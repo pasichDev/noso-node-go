@@ -55,7 +55,7 @@ func freePorts(t *testing.T, n int) int {
 			ls = append(ls, l)
 		}
 		for _, l := range ls {
-			l.Close()
+			_ = l.Close() // test cleanup
 		}
 		if ok {
 			return base
@@ -93,7 +93,7 @@ func (p *proc) stop() {
 		_ = p.cmd.Process.Kill()
 		<-done
 	}
-	p.log.Close()
+	_ = p.log.Close() // test cleanup
 	p.cmd = nil
 }
 
@@ -140,7 +140,7 @@ func (p *proc) rpcCall(t *testing.T, tokenName, method string, params ...string)
 	if err != nil {
 		return ""
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }() // test cleanup
 	b, _ := io.ReadAll(resp.Body)
 	return string(b)
 }

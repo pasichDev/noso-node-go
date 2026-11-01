@@ -70,7 +70,7 @@ func cmdSystem(d *Dispatcher, l string) {
 			d.log("Download speed   : 0 Kb/s")
 			return
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }() // the body is read; nothing is lost by a failed close
 		n, _ := io.Copy(io.Discard, resp.Body)
 		ms := time.Since(start).Milliseconds()
 		if ms < 1 {
@@ -95,7 +95,7 @@ func FetchSeeds(url, releaseKey string) string {
 		if err != nil {
 			return ""
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }() // the body is read; nothing is lost by a failed close
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return codec.Trim(string(b))
 	}
@@ -105,8 +105,6 @@ func FetchSeeds(url, releaseKey string) string {
 	}
 	return list
 }
-
-func fetchSeeds() string { return "" }
 
 // FetchDefaultSeeds is kept for callers that have no URL configured: nothing
 // is downloaded.

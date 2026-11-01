@@ -43,14 +43,12 @@ type MNCheck struct {
 }
 
 type mnState struct {
-	mu        sync.Mutex
-	list      []MNode
-	checks    []MNCheck
-	ipsProc   []string
-	waiting   []string
-	received  []string
-	verified  string // VerifiedNodes of the running verification
-	verifying int
+	mu       sync.Mutex
+	list     []MNode
+	checks   []MNCheck
+	ipsProc  []string
+	waiting  []string
+	received []string
 }
 
 // MNsListLen mirrors GetMNsListLength.
@@ -646,7 +644,7 @@ func validMNVERNonce(s string) bool {
 		return false
 	}
 	for i := 0; i < len(s); i++ {
-		if c := s[i]; !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+		if c := s[i]; (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 			return false
 		}
 	}

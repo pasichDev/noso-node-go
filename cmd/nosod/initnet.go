@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -132,6 +133,11 @@ const initUsage = `usage:
 The wallet passphrase comes from NOSO_WALLET_PASSPHRASE or -wallet-pass-file
 and is shared by the wallets this command creates.`
 
+// outf and outln write a message to the terminal. A failed write to stdout or
+// stderr has nowhere to be reported, so the error is dropped here, once.
+func outf(w io.Writer, format string, a ...any) { _, _ = fmt.Fprintf(w, format, a...) }
+func outln(w io.Writer, a ...any)               { _, _ = fmt.Fprintln(w, a...) }
+
 type seedList []string
 
 func (s *seedList) String() string     { return strings.Join(*s, ",") }
@@ -158,24 +164,24 @@ func initNetwork(args []string, stdout, stderr *os.File) int {
 	var seeds seedList
 	fs.Var(&seeds, "seed", "host:port of a node of the network (repeatable)")
 	if err := fs.Parse(args); err != nil {
-		fmt.Fprintln(stderr, initUsage)
+		outln(stderr, initUsage)
 		return 2
 	}
 	pass, err := walletPassphrase(*passFile)
 	if err != nil || len(pass) == 0 {
-		fmt.Fprintln(stderr, "init-network: a wallet passphrase is required (NOSO_WALLET_PASSPHRASE or -wallet-pass-file)")
+		outln(stderr, "init-network: a wallet passphrase is required (NOSO_WALLET_PASSPHRASE or -wallet-pass-file)")
 		return 2
 	}
 	if *data != "" {
 		return joinNetwork(*data, pass, *keysFile, *netFile, seeds, *propose, *bind, stdout, stderr)
 	}
 	if *dir == "" || *nodes < 1 || *props < 1 || *props > *nodes || *scale < 1 {
-		fmt.Fprintln(stderr, initUsage)
+		outln(stderr, initUsage)
 		return 2
 	}
 	peerPorts, rpcPorts, err := planPorts(*nodes, *basePort, *rpcBase)
 	if err != nil {
-		fmt.Fprintln(stderr, "init-network:", err)
+		outln(stderr, "init-network:", err)
 		return 2
 	}
 	bindAddr := *bind
@@ -191,12 +197,12 @@ func initNetwork(args []string, stdout, stderr *os.File) int {
 	case "no":
 		local = false
 	default:
-		fmt.Fprintln(stderr, "init-network: -local-masternodes is auto, yes or no")
+		outln(stderr, "init-network: -local-masternodes is auto, yes or no")
 		return 2
 	}
 	netCfg, err := node.NewNetworkConfig(local)
 	if err != nil {
-		fmt.Fprintln(stderr, "init-network:", err)
+		outln(stderr, "init-network:", err)
 		return 1
 	}
 	// Open all wallets first: the proposers file needs every key.
@@ -210,28 +216,28 @@ func initNetwork(args []string, stdout, stderr *os.File) int {
 	for i := 1; i <= *nodes; i++ {
 		d := filepath.Join(*dir, fmt.Sprintf("node%d", i))
 		if _, err := os.Stat(filepath.Join(d, "wallet.enc")); err == nil {
-			fmt.Fprintf(stderr, "init-network: %s already holds a wallet; refusing to overwrite a network\n", d)
+			outf(stderr, "init-network: %s already holds a wallet; refusing to overwrite a network\n", d)
 			return 1
 		}
 		if err := cli.CheckNewPassphrase(d, pass); err != nil {
-			fmt.Fprintln(stderr, "init-network:", err)
+			outln(stderr, "init-network:", err)
 			return 1
 		}
 		l, err := storage.LockDataDir(d)
 		if err != nil {
-			fmt.Fprintln(stderr, "init-network:", err)
+			outln(stderr, "init-network:", err)
 			return 1
 		}
 		locks = append(locks, l)
 		// the network file is written before the node first opens its data
 		// (the node reads it then), so nothing ever runs on a default
 		if err := node.WriteNetworkConfig(d, netCfg); err != nil {
-			fmt.Fprintln(stderr, "init-network:", err)
+			outln(stderr, "init-network:", err)
 			return 1
 		}
 		n, err := node.NewWithConfig(d, node.Config{WalletPassphrase: pass})
 		if err != nil {
-			fmt.Fprintf(stderr, "init-network: %s: %v\n", d, err)
+			outf(stderr, "init-network: %s: %v\n", d, err)
 			return 1
 		}
 		ns = append(ns, n)
@@ -250,7 +256,7 @@ func initNetwork(args []string, stdout, stderr *os.File) int {
 		if i < *props {
 			w, err := n.Wallet.NewAddress()
 			if err != nil {
-				fmt.Fprintln(stderr, "init-network:", err)
+				outln(stderr, "init-network:", err)
 				return 1
 			}
 			signAddr[i] = w.Hash
@@ -268,7 +274,7 @@ func initNetwork(args []string, stdout, stderr *os.File) int {
 		}
 		writeSeeds(n, strings.Join(sl, ""))
 		if err := n.SetProposers(keys); err != nil {
-			fmt.Fprintln(stderr, "init-network:", err)
+			outln(stderr, "init-network:", err)
 			return 1
 		}
 		n.UpdateOptions(func(o *node.StorageOptions) {
@@ -284,33 +290,33 @@ func initNetwork(args []string, stdout, stderr *os.File) int {
 		})
 		n.EnsureRPCTokens()
 		if err := n.SaveOptions(); err != nil {
-			fmt.Fprintln(stderr, "init-network:", err)
+			outln(stderr, "init-network:", err)
 			return 1
 		}
 		if err := os.WriteFile(filepath.Join(n.Lay.Root, bindFile), []byte(bindAddr+"\n"), 0o600); err != nil {
-			fmt.Fprintln(stderr, "init-network:", err)
+			outln(stderr, "init-network:", err)
 			return 1
 		}
 		if *scale > 1 {
 			m := fmt.Sprintf("anchor %d\nbase %d\nscale %d\n", anchor, anchor, *scale)
 			if err := os.WriteFile(filepath.Join(n.Lay.Root, devnetFile), []byte(m), 0o600); err != nil {
-				fmt.Fprintln(stderr, "init-network:", err)
+				outln(stderr, "init-network:", err)
 				return 1
 			}
 		}
 	}
-	fmt.Fprintf(stdout, "Network of %d nodes (%d proposers) created in %s\n", *nodes, *props, *dir)
-	fmt.Fprintln(stdout, "Proposer public keys (in rank order, also in every proposers.txt):")
+	outf(stdout, "Network of %d nodes (%d proposers) created in %s\n", *nodes, *props, *dir)
+	outln(stdout, "Proposer public keys (in rank order, also in every proposers.txt):")
 	for i, k := range keys {
-		fmt.Fprintf(stdout, "  %d  %s  (%s)\n", i+1, k, ns[i].Wallet.At(0).Hash)
+		outf(stdout, "  %d  %s  (%s)\n", i+1, k, ns[i].Wallet.At(0).Hash)
 	}
 	if *scale > 1 {
-		fmt.Fprintf(stdout, "\nTEST NETWORK: the chain clock of these nodes runs %dx faster than real time.\n", *scale)
-		fmt.Fprintln(stdout, "Never connect them to a network you do not own.")
+		outf(stdout, "\nTEST NETWORK: the chain clock of these nodes runs %dx faster than real time.\n", *scale)
+		outln(stdout, "Never connect them to a network you do not own.")
 	}
-	fmt.Fprintln(stdout, "\nStart every node in its own shell (the same passphrase for all):")
+	outln(stdout, "\nStart every node in its own shell (the same passphrase for all):")
 	for i := 1; i <= *nodes; i++ {
-		fmt.Fprintf(stdout, "  nosod -data %s -no-ntp\n", filepath.Join(*dir, fmt.Sprintf("node%d", i)))
+		outf(stdout, "  nosod -data %s -no-ntp\n", filepath.Join(*dir, fmt.Sprintf("node%d", i)))
 	}
 	return 0
 }
@@ -335,12 +341,12 @@ func writeSeeds(n *node.Node, seeds string) {
 // joinNetwork configures one data directory for an existing network.
 func joinNetwork(data string, pass []byte, keysFile, netFile string, seeds []string, propose bool, bind string, stdout, stderr *os.File) int {
 	if keysFile == "" {
-		fmt.Fprintln(stderr, "init-network: -proposer-keys is required with -data")
+		outln(stderr, "init-network: -proposer-keys is required with -data")
 		return 2
 	}
 	raw, err := os.ReadFile(keysFile)
 	if err != nil {
-		fmt.Fprintln(stderr, "init-network:", err)
+		outln(stderr, "init-network:", err)
 		return 1
 	}
 	var keys []string
@@ -352,45 +358,49 @@ func joinNetwork(data string, pass []byte, keysFile, netFile string, seeds []str
 		}
 	}
 	if err := cli.CheckNewPassphrase(data, pass); err != nil {
-		fmt.Fprintln(stderr, "init-network:", err)
+		outln(stderr, "init-network:", err)
 		return 1
 	}
 	lock, err := storage.LockDataDir(data)
 	if err != nil {
-		fmt.Fprintln(stderr, "init-network:", err)
+		outln(stderr, "init-network:", err)
 		return 1
 	}
-	defer lock.Close()
+	defer func() {
+		if err := lock.Close(); err != nil {
+			outln(stderr, "init-network: releasing the data directory lock:", err)
+		}
+	}()
 	if netFile != "" {
 		rawNet, err := os.ReadFile(netFile)
 		if err != nil {
-			fmt.Fprintln(stderr, "init-network:", err)
+			outln(stderr, "init-network:", err)
 			return 1
 		}
 		cfg, err := node.ParseNetworkConfig(string(rawNet))
 		if err != nil {
-			fmt.Fprintln(stderr, "init-network:", err)
+			outln(stderr, "init-network:", err)
 			return 1
 		}
 		if err := node.WriteNetworkConfig(data, cfg); err != nil {
-			fmt.Fprintln(stderr, "init-network:", err)
+			outln(stderr, "init-network:", err)
 			return 1
 		}
 	}
 	n, err := node.NewWithConfig(data, node.Config{WalletPassphrase: pass})
 	if err != nil {
-		fmt.Fprintln(stderr, "init-network:", err)
+		outln(stderr, "init-network:", err)
 		return 1
 	}
 	if err := n.SetProposers(keys); err != nil {
-		fmt.Fprintln(stderr, "init-network:", err)
+		outln(stderr, "init-network:", err)
 		return 1
 	}
 	var sl string
 	for _, s := range seeds {
 		h, p, ok := strings.Cut(s, ":")
 		if !ok || h == "" || codec.StrToIntDef(p, -1) < 1 {
-			fmt.Fprintf(stderr, "init-network: bad seed %q, want host:port\n", s)
+			outf(stderr, "init-network: bad seed %q, want host:port\n", s)
 			return 2
 		}
 		sl += h + ";" + p + ":"
@@ -402,22 +412,22 @@ func joinNetwork(data string, pass []byte, keysFile, netFile string, seeds []str
 		listed = listed || k == mine
 	}
 	if propose && !listed {
-		fmt.Fprintln(stderr, "init-network: -propose, but the first wallet key is not in the proposers file")
+		outln(stderr, "init-network: -propose, but the first wallet key is not in the proposers file")
 		return 1
 	}
 	n.UpdateOptions(func(o *node.StorageOptions) { o.AutoServer = true; o.BuildBlocks = propose })
 	n.EnsureRPCTokens()
 	if err := n.SaveOptions(); err != nil {
-		fmt.Fprintln(stderr, "init-network:", err)
+		outln(stderr, "init-network:", err)
 		return 1
 	}
 	if bind != "" {
 		if err := os.WriteFile(filepath.Join(data, bindFile), []byte(bind+"\n"), 0o600); err != nil {
-			fmt.Fprintln(stderr, "init-network:", err)
+			outln(stderr, "init-network:", err)
 			return 1
 		}
 	}
-	fmt.Fprintf(stdout, "%s: %d proposers, %d seeds, builds blocks: %v\nthis node's public key: %s\n",
+	outf(stdout, "%s: %d proposers, %d seeds, builds blocks: %v\nthis node's public key: %s\n",
 		data, len(keys), len(seeds), propose, mine)
 	return 0
 }

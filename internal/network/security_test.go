@@ -158,7 +158,7 @@ func TestM04_PeerCannotSetMyIP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }() // test cleanup
 	_, _ = c.Write([]byte("PSK 8.8.8.8 0.4.4Ab9 " + strconv.FormatInt(clk.now(), 10) + "\r\n"))
 	time.Sleep(300 * time.Millisecond)
 	if a.MyPublicIP() != "" {
@@ -253,11 +253,11 @@ func TestM15_PanicContained(t *testing.T) {
 	clk.v.Store(1_700_000_000)
 	e := NewEngine(mkNode(t, &clk))
 	a, b := net.Pipe()
-	defer b.Close()
+	defer func() { _ = b.Close() }() // test cleanup
 	func() {
 		defer e.recoverPanic("test", NewConn(a))
 		var m map[string]int
-		m["x"] = 1 // nil map write
+		m["x"] = 1 //nolint:staticcheck // a nil map write is the panic this test provokes
 	}()
 	if _, err := a.Write([]byte("x")); err == nil {
 		t.Fatal("connection of the panicking handler left open")
@@ -277,7 +277,9 @@ func TestH02_DirectiveOverTheWire(t *testing.T) {
 	if nb.CFG.Param(0) != "EMPTY" {
 		t.Fatal("valid directive not applied")
 	}
-	nb.CFG.SetData("NORMAL", 0)
+	if err := nb.CFG.SetData("NORMAL", 0); err != nil {
+		t.Fatal(err)
+	}
 	b.addIncoming(1, line) // replay
 	b.Tick()
 	if nb.CFG.Param(0) != "NORMAL" {

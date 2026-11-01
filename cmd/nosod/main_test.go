@@ -183,5 +183,5 @@ func TestRunUsesTheLockItIsHandedAndReleasesIt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the lock was not released: %v", err)
 	}
-	l2.Close()
+	_ = l2.Close() // test cleanup
 }

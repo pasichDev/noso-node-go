@@ -61,7 +61,12 @@ func (h *Headers) Add(block int64, blockHash, sumHash string) bool {
 	if err != nil {
 		return false
 	}
-	defer f.Close()
+	closed := false
+	defer func() {
+		if !closed {
+			_ = f.Close() // an early return: the write already failed
+		}
+	}()
 	st, err := f.Stat()
 	if err != nil {
 		return false
@@ -80,7 +85,11 @@ func (h *Headers) Add(block int64, blockHash, sumHash string) bool {
 		return false
 	}
 	Crash("hdr-add-post")
-	return syncFile(f) == nil // durable before the caller moves on (re2 #7)
+	if syncFile(f) != nil { // durable before the caller moves on (re2 #7)
+		return false
+	}
+	closed = true
+	return f.Close() == nil
 }
 
 // RemoveLast drops the final record (RemoveHeadersLastRecord).
@@ -103,8 +112,11 @@ func (h *Headers) RemoveLast() bool {
 	if err != nil {
 		return false
 	}
-	defer f.Close()
-	return syncFile(f) == nil
+	if syncFile(f) != nil {
+		_ = f.Close() // the sync already failed
+		return false
+	}
+	return f.Close() == nil
 }
 
 // Height mirrors GetHeadersHeigth: record count minus one, -1 on error.

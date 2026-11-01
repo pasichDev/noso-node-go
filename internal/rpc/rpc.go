@@ -145,16 +145,16 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	scope := s.authScope(r.Header)
 	switch {
 	case o.RPCFilter && !ValidRPCHost(o.RPCWhitelist, host):
-		io.WriteString(w, ErrorCode(498, -1))
+		_, _ = io.WriteString(w, ErrorCode(498, -1))
 	case r.Header.Get("Origin") != "" || scope == 0:
-		io.WriteString(w, ErrorCode(498, -1))
+		_, _ = io.WriteString(w, ErrorCode(498, -1))
 	case r.Method != http.MethodPost:
-		io.WriteString(w, ErrorCode(400, -1))
+		_, _ = io.WriteString(w, ErrorCode(400, -1))
 	case !strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "application/json"):
-		io.WriteString(w, ErrorCode(400, -1))
+		_, _ = io.WriteString(w, ErrorCode(400, -1))
 	default:
 		body, _ := io.ReadAll(io.LimitReader(r.Body, MaxBody))
-		io.WriteString(w, s.parse(string(body), scope >= 2))
+		_, _ = io.WriteString(w, s.parse(string(body), scope >= 2))
 	}
 }
 

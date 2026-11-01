@@ -173,7 +173,7 @@ func (e *Engine) RequestLine(host string, port int, line string) string {
 		return ""
 	}
 	cc := NewConn(c)
-	defer cc.Close()
+	defer func() { _ = cc.Close() }() // one line asked and answered; nothing is pending
 	if cc.WriteLine(line) != nil {
 		return ""
 	}

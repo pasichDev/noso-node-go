@@ -9,18 +9,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pasichDev/noso-node-go/internal/consensus"
 	"github.com/pasichDev/noso-node-go/internal/crypto"
 	"github.com/pasichDev/noso-node-go/internal/types"
 )
 
-func consensusGenesis() int64 { return int64(consensus.GenesysTimeStamp) }
-
 // ReadLine keeps a partial line across a poll timeout (finding 7).
 func TestReadLineKeepsPartialAcrossTimeout(t *testing.T) {
 	a, b := net.Pipe()
-	defer a.Close()
-	defer b.Close()
+	defer func() { _ = a.Close() }() // test cleanup
+	defer func() { _ = b.Close() }() // test cleanup
 	c := NewConn(b)
 	go func() {
 		_, _ = a.Write([]byte("PSK 2 0.4.4 123 $PI"))
@@ -43,9 +40,9 @@ func TestReadLineKeepsPartialAcrossTimeout(t *testing.T) {
 // A line cut by EOF is an error, not a complete line (finding 7, Indy raises).
 func TestReadLineTruncatedAtEOF(t *testing.T) {
 	a, b := net.Pipe()
-	defer b.Close()
+	defer func() { _ = b.Close() }() // test cleanup
 	c := NewConn(b)
-	go func() { _, _ = a.Write([]byte("PSK 2 0.4")); a.Close() }()
+	go func() { _, _ = a.Write([]byte("PSK 2 0.4")); _ = a.Close() }()
 	if l, err := c.ReadLine(time.Second); err == nil {
 		t.Fatalf("truncated line returned as complete: %q", l)
 	}
@@ -60,7 +57,7 @@ func TestStalledTransferDoesNotBlockTick(t *testing.T) {
 	e := NewEngine(n)
 	t.Cleanup(e.Stop)
 	ln, _ := net.Listen("tcp", "127.0.0.1:0")
-	t.Cleanup(func() { ln.Close() })
+	t.Cleanup(func() { _ = ln.Close() })
 	go func() {
 		c, err := ln.Accept()
 		if err != nil {
@@ -98,17 +95,17 @@ func TestStalledTransferDoesNotBlockTick(t *testing.T) {
 // answers the summary request with data.
 func serveSummary(t *testing.T, fullHash string, data []byte) string {
 	ln, _ := net.Listen("tcp", "127.0.0.1:0")
-	t.Cleanup(func() { ln.Close() })
+	t.Cleanup(func() { _ = ln.Close() })
 	go func() {
 		c, err := ln.Accept()
 		if err != nil {
 			return
 		}
-		defer c.Close()
+		defer func() { _ = c.Close() }() // test cleanup
 		r := bufio.NewReader(c)
 		_, _ = r.ReadString('\n')
 		_, _ = r.ReadString('\n')
-		fmt.Fprintf(c, "PSK 2 0.4.4zzz 1 $PONG 1 0 h %s 0 h 3 -1 m 0 null 0 g c p\r\n", fullHash)
+		_, _ = fmt.Fprintf(c, "PSK 2 0.4.4zzz 1 $PONG 1 0 h %s 0 h 3 -1 m 0 null 0 g c p\r\n", fullHash)
 		time.Sleep(600 * time.Millisecond)
 		_, _ = r.ReadString('\n')
 		var b bytes.Buffer
@@ -159,21 +156,4 @@ func TestForgedSummaryWithMatchingPrefixRefused(t *testing.T) {
 	if got := n.Summary.BalanceIndexed(addr); got != 0 {
 		t.Fatalf("forged summary stored, attacker balance %d", got)
 	}
-}
-
-// buildChain makes a node with three blocks and returns it.
-func buildChain(t *testing.T, ck *clock) (*Engine, string) {
-	n := mkNode(t, ck)
-	base := int64(consensusGenesis()) + 600*10
-	ck.v.Store(base)
-	miner := n.Wallet.At(0).Hash
-	for i := int64(1); i <= 3; i++ {
-		ck.v.Add(600)
-		if _, err := n.BuildNewBlock(i, ck.now(), n.MyLastBlockHash(), miner, BuildSolution); err != nil {
-			t.Fatal(err)
-		}
-	}
-	e := NewEngine(n)
-	t.Cleanup(e.Stop)
-	return e, miner
 }

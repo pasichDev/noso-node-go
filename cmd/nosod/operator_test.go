@@ -47,7 +47,7 @@ func portsFree(ports ...int) bool {
 		if err != nil {
 			return false
 		}
-		l.Close()
+		_ = l.Close() // test cleanup
 	}
 	return true
 }

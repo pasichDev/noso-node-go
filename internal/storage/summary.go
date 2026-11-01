@@ -409,7 +409,6 @@ func (s *SummaryDB) updateChangesLocked() error {
 		return err // FIX(M-12): write failures are reported (nosounit.pas:549-553 ignored them)
 	}
 	{
-		defer f.Close()
 		for i := range s.block {
 			b := &s.block[i]
 			if b.slot < 0 {
@@ -436,6 +435,9 @@ func (s *SummaryDB) updateChangesLocked() error {
 		}
 		if serr := syncFile(f); serr != nil && err == nil {
 			err = serr
+		}
+		if cerr := f.Close(); cerr != nil && err == nil {
+			err = cerr
 		}
 	}
 	Crash("sum-post")

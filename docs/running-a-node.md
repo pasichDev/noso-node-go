@@ -129,7 +129,7 @@ running node); the tokens are in `advopt.txt`. See `rpc.md`.
    `MNSign` in `advopt.txt` with the node stopped).
 3. The masternode sign address (`MNSign`) must not be a proposer's key: the node signs `MNVER` challenges for any peer that asks, and a proposer key never does that (such a masternode is not listed; `nosod` says so at start). `init-network` gives each proposer node a second address for it.
 4. The address must be a public one: a report naming a loopback, private or documentation address is dropped (the node dials the address a report names). The one exception is a network whose `network.txt` sets `local_masternodes true` (`init-network` does so when `-host` is loopback): there loopback and private-use addresses (127/8, 10/8, 172.16/12, 192.168/16) are accepted, on every node alike, because the rule comes only from that file. At most one masternode can use one address. `TestLoopbackMasternodeIsListedAndPaid` runs a masternode on 127.0.0.1 with real processes, and `TestMasternodeIsListedOnEveryNode` does it in one process.
-4. Open the TCP port; the server runs when `Autoserver True` is set.
+5. Open the TCP port; the server runs when `Autoserver True` is set.
 
 The node reports itself every block between age 10 and 495. Every node that
 receives the report checks its signature and stake and then challenges the IP

@@ -21,7 +21,7 @@ func TestCloseDoesNotWaitForAnIdleClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()   // test cleanup
 	time.Sleep(100 * time.Millisecond) // let the server take the connection
 	done := make(chan struct{})
 	go func() { _ = s.Close(); close(done) }()

@@ -16,8 +16,6 @@ import (
 	"github.com/pasichDev/noso-node-go/internal/types"
 )
 
-const repoSeedsURL = "https://raw.githubusercontent.com/nosocoin/NosoNode/main/defseeds.nos"
-
 func p(line string, n int64) string { return codec.Parameter(line, n) }
 
 func i2c(v int64) string { return network.Int2Curr(v) }
@@ -568,10 +566,6 @@ func cmdClearPSOs(d *Dispatcher, l string) {
 	if !d.E.ClearPSOs(addr, d.printer()) {
 		d.failed = true
 	}
-}
-
-func skipped(why string) func(d *Dispatcher, l string) {
-	return func(d *Dispatcher, l string) { d.log("Command not supported by this implementation: %s.", why) }
 }
 
 func boolStr(b bool) string {

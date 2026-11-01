@@ -118,14 +118,6 @@ func (d *devnet) stopAll() {
 	}
 }
 
-func (d *devnet) heights() []int64 {
-	var h []int64
-	for _, nd := range d.nodes {
-		h = append(h, nd.MyLastBlock())
-	}
-	return h
-}
-
 // converged reports whether every given node holds the same tip at least at
 // height min.
 func (d *devnet) converged(min int64, idx ...int) bool {

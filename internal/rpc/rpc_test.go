@@ -79,7 +79,7 @@ func post(t *testing.T, url, token, body string, hdr map[string]string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }() // test cleanup
 	b, _ := io.ReadAll(resp.Body)
 	return string(b)
 }

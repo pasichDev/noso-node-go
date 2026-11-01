@@ -51,7 +51,9 @@ func TestSummaryGolden59238(t *testing.T) {
 	}
 	s.CreditTo("NbrandNewAddress1234567890abcdefg", 77, 59239)
 	s.CreditTo(GenesisAddress, 0, 59239)
-	s.UpdateChanges()
+	if err := s.UpdateChanges(); err != nil {
+		t.Fatal(err)
+	}
 	if s.Len() != 4957 || s.LastOp() != 59239 {
 		t.Fatalf("after: %d %d", s.Len(), s.LastOp())
 	}
@@ -143,7 +145,9 @@ func TestGVTsGoldenAndRules(t *testing.T) {
 	if g.ChangeOwner(0, owner, g.Index(2).Owner) != 0 {
 		t.Fatal("transfer")
 	}
-	g.Save()
+	if err := g.Save(); err != nil {
+		t.Fatal(err)
+	}
 	g.Reload()
 	if g.Index(0).Owner != g.Index(2).Owner {
 		t.Fatal("persisted")
@@ -249,7 +253,9 @@ func TestPSOsRoundTrip(t *testing.T) {
 		t.Fatal("lock")
 	}
 	p.AddNew(1, "owner", 500, "1:123;2:200")
-	p.Save(100)
+	if err := p.Save(100); err != nil {
+		t.Fatal(err)
+	}
 	raw, _ := os.ReadFile(l.PSOs)
 	if len(raw) < 12+40 {
 		t.Fatal("size")
@@ -303,7 +309,7 @@ func TestOptionsRoundTrip(t *testing.T) {
 	if err := o.Save(l.AdvOpt); err != nil {
 		t.Fatal(err)
 	}
-	var q Options = DefaultOptions("x")
+	q := DefaultOptions("x")
 	if err := q.Load(l.AdvOpt); err != nil {
 		t.Fatal(err)
 	}

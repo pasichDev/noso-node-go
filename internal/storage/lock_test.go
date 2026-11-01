@@ -27,7 +27,9 @@ func TestRE2LockDataDirExclusive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("after Close: %v", err)
 	}
-	b.Close()
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if st, _ := os.Stat(root); runtime.GOOS != "windows" && st.Mode().Perm() != 0o700 {
 		t.Errorf("data dir mode %v", st.Mode())
 	}
@@ -49,7 +51,9 @@ func TestPlantedTxnManifestIsIgnored(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a planted manifest stopped the start: %v", err)
 	}
-	l.Close()
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if b, _ := os.ReadFile(outside); string(b) != "keep" {
 		t.Fatal("a file outside the data directory was replaced")
 	}
@@ -70,7 +74,9 @@ func TestLinksInTheDataDirectoryAreNotFollowed(t *testing.T) {
 		t.Fatal(err)
 	}
 	if l, err := LockDataDir(root); err == nil {
-		l.Close()
+		if err := l.Close(); err != nil {
+			t.Fatal(err)
+		}
 		t.Fatal("a .lock link was accepted")
 	}
 	if b, _ := os.ReadFile(victim); string(b) != "precious" {
@@ -85,7 +91,9 @@ func TestLinksInTheDataDirectoryAreNotFollowed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	l.Close()
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if b, _ := os.ReadFile(victim); string(b) != "precious" {
 		t.Fatalf("the target of the temporary link was zeroed: %q", b)
 	}

@@ -107,7 +107,7 @@ func Serve(path string, run Runner) (*Server, error) {
 			s.wg.Add(1)
 			go func() {
 				defer s.wg.Done()
-				defer c.Close()
+				defer func() { _ = c.Close() }() // the answer is written; a failed close of a finished connection loses nothing
 				// FIX(F-16): a client that sends nothing is dropped after
 				// idleTimeout, and Close drops it at once; the command itself
 				// then runs without a deadline of the connection.
@@ -170,7 +170,7 @@ func CallAuth(path, line string, pass []byte, w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }() // the client side of a finished exchange
 	if len(pass) > 0 {
 		if _, err := io.WriteString(c, authPrefix+string(pass)+"\n"); err != nil {
 			return err

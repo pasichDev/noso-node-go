@@ -89,14 +89,6 @@ func (t *peerTable) get(i int) Peer {
 	return t.slots[i].p
 }
 
-func (t *peerTable) set(i int, p Peer) {
-	t.mu.Lock()
-	if i >= 1 && i <= MaxConnections && t.slots[i] != nil {
-		t.slots[i].p = p
-	}
-	t.mu.Unlock()
-}
-
 // GetSlotFromIP mirrors mpred.pas:61-74.
 func (e *Engine) GetSlotFromIP(ip string) int {
 	e.peers.mu.Lock()

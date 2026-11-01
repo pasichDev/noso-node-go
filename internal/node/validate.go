@@ -268,7 +268,7 @@ func checkOrderGroups(user []types.Order) error {
 			return bad("order %d: more lines than declared", i)
 		}
 		derived := crypto.GetOrderHash(codec.IntToStr(int64(n)) + codec.IntToStr(g.TimeStamp) + ids)
-		if g.OrderID != derived && !(n == 1 && g.OrderID == SingleOrderID(g.TrfrID)) {
+		if g.OrderID != derived && (n != 1 || g.OrderID != SingleOrderID(g.TrfrID)) {
 			return bad("order %d: id is not derived from its lines", i)
 		}
 		i += n

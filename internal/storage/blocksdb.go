@@ -66,26 +66,36 @@ func (d *BlocksDB) LoadIndex() {
 	}
 }
 
+// writeTail writes buf at the last whole record boundary (over a torn tail),
+// syncs the file and closes it; the first error of any step is returned. The
+// caller holds d.mu.
+func (d *BlocksDB) writeTail(buf []byte) (err error) {
+	f, err := os.OpenFile(d.path, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+	}()
+	st, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if _, err = f.WriteAt(buf, st.Size()/types.DBRecSize*types.DBRecSize); err != nil {
+		return err
+	}
+	return syncFile(f)
+}
+
 // Add mirrors AddRecordToDBFile. The record is written at the record boundary
 // (over a torn tail) and synced; the index is updated only if the write
 // succeeded.
 func (d *BlocksDB) Add(block, order, source, target int32) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	f, err := os.OpenFile(d.path, os.O_RDWR|os.O_CREATE, 0o600)
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-	st, err := f.Stat()
-	if err != nil {
-		return false
-	}
-	off := st.Size() / types.DBRecSize * types.DBRecSize
-	if _, err = f.WriteAt(types.DBRecord{Block: block, OrderID: order, Source: source, Target: target}.Encode(), off); err != nil {
-		return false
-	}
-	if err = syncFile(f); err != nil {
+	if err := d.writeTail(types.DBRecord{Block: block, OrderID: order, Source: source, Target: target}.Encode()); err != nil {
 		return false
 	}
 	d.index[order] = append(d.index[order], block)
@@ -127,7 +137,7 @@ func (d *BlocksDB) LastBlock() int {
 	if err != nil {
 		return 0
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // read only: nothing can be lost by a failed close
 	st, err := f.Stat()
 	if err != nil || st.Size() < types.DBRecSize {
 		return 0
@@ -175,19 +185,7 @@ func (d *BlocksDB) AddBlock(block int32, orders []types.Order) error {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	f, err := os.OpenFile(d.path, os.O_RDWR|os.O_CREATE, 0o600)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	st, err := f.Stat()
-	if err != nil {
-		return err
-	}
-	if _, err = f.WriteAt(buf, st.Size()/types.DBRecSize*types.DBRecSize); err != nil {
-		return err
-	}
-	if err = syncFile(f); err != nil {
+	if err := d.writeTail(buf); err != nil {
 		return err
 	}
 	for _, id := range ids {

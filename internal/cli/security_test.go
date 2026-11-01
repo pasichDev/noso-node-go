@@ -52,13 +52,13 @@ func TestM02_SignedSeedList(t *testing.T) {
 	kp := crypto.GenerateKeyPair()
 	list := "1.2.3.4;8080:5.6.7.8;8080:"
 	mux := http.NewServeMux()
-	mux.HandleFunc("/defseeds.nos", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(list)) })
+	mux.HandleFunc("/defseeds.nos", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(list)) })
 	mux.HandleFunc("/defseeds.nos.sig", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(crypto.SignCanonical(kp.PrivateKey, "SEEDS1", list)))
+		_, _ = w.Write([]byte(crypto.SignCanonical(kp.PrivateKey, "SEEDS1", list)))
 	})
-	mux.HandleFunc("/bad.nos", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("9.9.9.9;8080:")) })
+	mux.HandleFunc("/bad.nos", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("9.9.9.9;8080:")) })
 	mux.HandleFunc("/bad.nos.sig", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(crypto.SignCanonical(kp.PrivateKey, "SEEDS1", list)))
+		_, _ = w.Write([]byte(crypto.SignCanonical(kp.PrivateKey, "SEEDS1", list)))
 	})
 	srv := httptest.NewTLSServer(mux)
 	defer srv.Close()

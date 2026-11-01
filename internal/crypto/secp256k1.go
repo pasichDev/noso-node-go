@@ -129,14 +129,6 @@ func decodePoint(b []byte) (point, bool) {
 	return point{}, false
 }
 
-func encodePoint(p point) []byte {
-	out := make([]byte, 65)
-	out[0] = 4
-	p.x.FillBytes(out[1:33])
-	p.y.FillBytes(out[33:])
-	return out
-}
-
 type ecdsaSig struct{ R, S *big.Int }
 
 var secpHalfN = new(big.Int).Rsh(secpN, 1)
