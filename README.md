@@ -68,15 +68,25 @@ go build -o nosocli ./cmd/nosocli
 
 export NOSO_WALLET_PASSPHRASE='choose a passphrase of 8 or more characters'
 ./nosod init-network -dir DEVNET -nodes 4 -proposers 3     # wallets, proposers.txt, seeds, ports
-# in four shells (the same passphrase in each):
-./nosod -data DEVNET/node1 -no-ntp
-./nosod -data DEVNET/node2 -no-ntp
-./nosod -data DEVNET/node3 -no-ntp
-./nosod -data DEVNET/node4 -no-ntp
+# in four shells (the same passphrase in each); -bind keeps the peer listener on loopback
+./nosod -data DEVNET/node1 -no-ntp -bind 127.0.0.1
+./nosod -data DEVNET/node2 -no-ntp -bind 127.0.0.1
+./nosod -data DEVNET/node3 -no-ntp -bind 127.0.0.1
+./nosod -data DEVNET/node4 -no-ntp -bind 127.0.0.1
 
 ./nosocli -data DEVNET/node1 status          # talks to the running node
 ./nosocli -data DEVNET/node1 pubkey          # address and public key, never the private key
+# the first block comes at the next ten-minute boundary and its reward is the first
+# spendable coin; then, from node 4 (it builds nothing) to any address:
+./nosocli -data DEVNET/node4 sendto N3DthVsfEUtqrgWFHTEB6F88xLkT3Df 1.5   # amounts are NOSO
+./nosocli -data DEVNET/node4 balance
 ```
+
+`init-network` writes `bind.txt` into each data directory (its `-host`, loopback
+by default), so a network made by it stays on this machine even without
+`-bind`; a node started on its own listens on every interface unless you give
+`-bind`. Its default ports for N nodes are peers `18080..` and RPC right after
+them (`18080+N..`); ports that overlap are refused.
 
 `init-network` prints the public keys of the proposers and the command to start
 every node; any number of nodes from one works. A single node on its own is

@@ -123,7 +123,7 @@ Go locations are in `internal/` unless noted.
 | `nosonosocfg`: all routines | ported | `storage.CFG` |
 | `nosopsos`: file, locked-masternode, header and PSO routines | ported | `storage.PSOs` (`GetPSOHeadersFromFile` is replaced by `Load`) |
 | `nosowallcon`: all routines | ported / changed | `storage.Wallet`, `OpenWalletEncrypted` |
-| `nosoblock`: DB routines (`CreateDBFile` ... `GetOrderFromDB`) | ported | `storage.BlocksDB` |
+| `nosoblock`: DB routines (`CreateDBFile` ... `GetOrderFromDB`) | ported; the index is always kept and filled with every block | `storage.BlocksDB` |
 | `GetMyLastUpdatedBlock`, `GetBlockTrxs`, `LoadBlockDataHeader` | ported | `storage.Blocks` |
 | `SaveStreamAsZipBlocks`, `GetBlocksAsStream` | changed | `node.ZipBlocks`, `StageBlocks` |
 
@@ -152,7 +152,7 @@ Go locations are in `internal/` unless noted.
 Every command of the dispatch table exists, except these which were
 removed: `update`, `getbeta`, `checkupdates`, `sendreport`, `testnet`
 (security, C-08 and M-02). `clear`, `setport`, `showpending` and `clearpsos` keep their
-original (no-op or "deprecated") behaviour or, for `clearpsos`, do nothing in this port. `expkeys` prints the keys (the original copies them to the clipboard). `restart` works in nosod (in-process reopen); the GUI answers that it cannot restart. `TestEveryOriginalCommandHasAHandler`
+original (no-op or "deprecated") behaviour `newpso` and `clearpsos` were removed: they changed the PSO file of one node only, and no block carries a PSO, so none can be created (`newpso` answers with that reason). `expkeys` prints the keys (the original copies them to the clipboard). `restart` works in nosod (in-process reopen); the GUI answers that it cannot restart. `TestEveryOriginalCommandHasAHandler`
 checks the list.
 
 ## GUI (`cmd/nosogui`, Fyne, build tag `gui`)
@@ -184,7 +184,7 @@ clipboard, window close button) is unverified. The test driver also runs
 | Debug logs (`MemoLog`, `MemoExceptLog`, `Button1Click`, `Button2Click`, `TUpdateLogs`) | Events and Exceptions sub tabs | rendered (empty) |
 | Processes tab (`SG_OpenThreads`, `SG_FileProcs`, performance grid) | informational goroutine/memory page | rendered; thread and file tables intentionally not ported (no counterpart) |
 | `TabNodes` / `GridNodes`, reported and verified masternodes | masternodes tab | rendered, empty list (no masternodes in the fixture) |
-| `TabGVTs`, `GVTsGrid`, `PanelTransferGVT` | GVT tab | rendered, empty list; transfer compiled only |
+| `TabGVTs`, `GVTsGrid`, `PanelTransferGVT` | GVT tab | rendered; the 100 GVTs of a chain belong to its first proposer; transfer end to end in `network` tests (`sendgvt`), the dialog compiled only |
 | Options: wallet (`CB_WO_HideEmptyChange`, `CB_WO_MultisendChange`, `CBKeepBlocksDBChange`, `CBRunNodeAloneChange`) | options, Wallet | rendered; hide-empty checkbox driven (`TestHideEmptyOption`) |
 | Options: `CB_WO_AutoupdateChange`, `CBSendReportsChange` | removed | skipped on purpose (C-08, no reports are uploaded) |
 | Options: node (`TabNodeOptionsShow`, `BSaveNodeOptionsClick`, `BTestNodeClick`, `CBAutoIPClick`) | options, Node | rendered; save and test compiled only |

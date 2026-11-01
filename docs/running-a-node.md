@@ -65,13 +65,21 @@ block from a peer.
 **All on one machine** (or for a trial):
 
 ```sh
-./nosod init-network -dir DEVNET -nodes 4 -proposers 3 [-host 127.0.0.1] [-base-port 18080] [-rpc-base-port 18078]
+./nosod init-network -dir DEVNET -nodes 4 -proposers 3 [-host 127.0.0.1] [-bind ADDR] [-base-port 18080] [-rpc-base-port N]
 ```
 
 creates `DEVNET/node1..node4`, each with its own wallet, the same
-`proposers.txt` (the first three nodes), `nosocfg.psk` with the other nodes as
-seeds, `advopt.txt` with `Autoserver True`, `BuildBlocks True` for proposers,
-its peer port (`base+i-1`) and RPC port, and random RPC tokens. It prints the
+`proposers.txt` (the first three nodes), `nosocfg.psk` with the same seed list
+on every node (all nodes, the node itself included, which never dials itself:
+the nodes vote on the hash of their configuration, so lists that differ never
+form a consensus and no masternode could be listed), `advopt.txt` with `Autoserver True`, `BuildBlocks True` for proposers,
+its peer port (`base+i-1`) and RPC port, a `bind.txt` and random RPC tokens.
+`-host` is the address the nodes tell each other; the peer listener binds
+`-bind` (default: `-host`, so `127.0.0.1` keeps the network on this machine; a
+plain `nosod` without `-bind` or `bind.txt` listens on every interface). The
+RPC server always binds loopback. Peer ports are `base-port+i-1`; unless you
+give `-rpc-base-port`, the RPC ports follow them (`base-port+nodes+i-1`).
+Overlapping or out-of-range ports are refused before anything is written. It prints the
 proposers' public keys, never a private key, and the `nosod -data ... -no-ntp`
 line for each node. Start the nodes in any order; the server opens at start, no
 console command is needed. Any number of nodes from 1 works (with one
@@ -79,7 +87,8 @@ proposer the others only follow).
 
 **Across machines**: on each machine make the wallet (`nosocli newaddress`
 or start `nosod` once), collect the proposers' public keys with
-`nosocli pubkey` into one file and run
+`nosocli pubkey` into one file (its `address key` lines are accepted as they
+are) and run
 
 ```sh
 ./nosod init-network -data NOSODATA -proposer-keys proposers.txt -seed host1:8080 -seed host2:8080 [-propose]
@@ -87,7 +96,9 @@ or start `nosod` once), collect the proposers' public keys with
 
 which imports the keys, writes the seeds and `Autoserver True`, and with
 `-propose` turns block building on (the first wallet key must be in the list).
-Open the peer port.
+Open the peer port. List every node of the network, this one included, with
+`-seed`, and give all nodes the same list: the configuration hash is part of
+the status the seeds vote on.
 
 A test network can run faster than real time: `init-network -clock-scale N`
 writes `devnet.txt` into the data directories and every node of that network
@@ -105,11 +116,14 @@ running node); the tokens are in `advopt.txt`. See `rpc.md`.
 
 ## Becoming a masternode
 
-1. Keep at least 1050000 NOSO (the stack) on the funds address.
+1. Keep the stake on the funds address: 1050000 NOSO from block 110001; below
+   that it is 0.2% of the supply (about 33 NOSO at block 120, the figure on a
+   fresh test network). `consensus.GetStackRequired` is the exact rule.
 2. `nosocli mnset <public ip> <port> <funds address> <sign address>` (the sign
    address is one of this wallet; or edit `MNIP`, `MNPort`, `MNFunds`,
    `MNSign` in `advopt.txt` with the node stopped).
-3. Open the TCP port; the server runs when `Autoserver True` is set.
+3. The address must be a public one: a report naming a loopback, private or documentation address is dropped (the node dials the address a report names), so a masternode cannot be listed on a network that lives on 127.0.0.1. The in-process test `TestMasternodeIsListedOnEveryNode` lists one by routing a public-looking address to loopback.
+4. Open the TCP port; the server runs when `Autoserver True` is set.
 
 The node reports itself every block between age 10 and 495. Every node that
 receives the report checks its signature and stake and then challenges the IP

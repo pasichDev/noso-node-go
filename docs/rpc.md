@@ -24,9 +24,9 @@ with content type `text/html`, like the original.
 | `test` | | `{"result":"testok"}` |
 | `restart` | | `{"result":"True"}`; nosod closes and reopens the node in the same process. Front ends that cannot restart (the GUI) answer `Invalid method` |
 | `getaddressbalance` | addresses or aliases | `{"valid","address","alias","balance","incoming","outgoing"}`; unknown address: `valid:false, alias:null, -1` values; an unknown *alias* is silently skipped |
-| `getorderinfo` | order id | `{"valid","order":{"orderid","timestamp","block","type","trfrs","receiver","amount","fee","reference","sender"}}` (orders already mined are found only with `BlocksDB True`) |
+| `getorderinfo` | order id | `{"valid","order":{"orderid","timestamp","block","type","trfrs","receiver","amount","fee","reference","sender"}}` (mined orders are found through the block index, which is always kept) |
 | `getblocksinfo` | block numbers | `{"valid","number","timestart","timeend","timetotal","last20","totaltransactions","difficulty","target","solution","lastblockhash","nextdifficult","miner","feespaid","reward","hash"}` |
-| `getmainnetinfo` | | `{"lastblock","lastblockhash","headershash","sumaryhash","pending","supply"}` (from the consensus) |
+| `getmainnetinfo` | | `{"lastblock","lastblockhash","headershash","sumaryhash","pending","supply"}` (from the consensus of the seeds; when they form no majority, the node's own view) |
 | `getpendingorders` | | `{"pendings":[...]}` of `id,time,type,from,to,amount,fee,reference` |
 | `lockedmns` | | `{"lockedmns":[...]}` of `address,expire` |
 | `getpeers` | | `{"peers":[...]}` |
@@ -39,7 +39,7 @@ with content type `text/html`, like the original.
 | `islocaladdress` | address | `{"result":bool}` |
 | `setdefault` | address | `{"result":bool}` |
 | `getgvtinfo` | | `{"available","buy","sell"}` |
-| `sendfunds` | destination amount [reference] | `{"valid":true,"result":"OR..."}` or `{"valid":false,"result":code}` |
+| `sendfunds` | destination amount [reference] | `{"valid":true,"result":"OR..."}` or `{"valid":false,"result":code}`. **The amount is in base units** (1 NOSO = 100000000; `150000000` is 1.5 NOSO), unlike the CLI. Codes below |
 | `checkcertificate` | certificate | `{"valid":true,"address","signtime"}` or `{"valid":false}` |
 | `submitorder` | order text | `{"result":true}` |
 | `submitorderwr` | order text | `{"result":true,"response":"..."}` |
@@ -56,3 +56,17 @@ with content type `text/html`, like the original.
   `application/json`, are refused.
 * `getnewaddressfull` returns an empty `private` unless `RPCExposeKeys True`.
 * `checkcertificate` takes `certificate audience nonce`.
+
+## `sendfunds` result codes
+
+`{"valid":false,"result":N}`: `N` is the refusal of the node that took the
+order. 1 not enough spendable funds (amount plus fee, minus orders still
+waiting for a block); 2 the same order is already waiting; 3 older than the
+last block; 4 the last block ended more than 10 minutes ago, so no new order
+is accepted until the next block arrives (a proposer is probably down); 5
+mined recently; 7/8 negative amount/fee; 9 sender not an address; 10 receiver
+not a regular address; 11 sender locked; 12 network stopped; 13 sender does not
+match the key; 15 overflow; 16 wrong type; 19 no node reachable; 20 this node
+is not up to date yet; 21 no answer; 89 more than 30 lines; 96 unparsable;
+102 bad reference; 103 lines disagree; 104 pool full or too old; 999 any other
+failure.

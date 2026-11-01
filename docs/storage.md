@@ -12,7 +12,7 @@ records). Records are `packed` (no padding) unless noted.
 | `blchhead.nos` | headers: 70 byte records, record index = block number |
 | `BLOCKS/N.blk` | block N |
 | `BLOCKS/DB/blocks_db.nos` | optional order index: 16 byte records |
-| `gvts.psk` | 100 GVT records of 105 bytes |
+| `gvts.psk` | 100 GVT records of 105 bytes; created with block 1 for the proposer that sealed it |
 | `nosocfg.psk` | one line of text (see below) |
 | `masternodes.txt` | one line `BLOCK ip;port:fund:age ...` terminated with CR LF |
 | `wallet.pkw` | wallet: 626 byte records |
