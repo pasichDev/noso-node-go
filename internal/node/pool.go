@@ -345,7 +345,12 @@ func (n *Node) ValidateTrfr(o types.Order, origen string) int {
 // loop overwrite codes 96-99 with 0, so a rejected order could be answered
 // with an empty string, mpprotocol.pas:917-927) and validation only runs on
 // a completely parsed line.
-func (n *Node) PTCOrder(line string) string {
+func (n *Node) PTCOrder(line string) string { return n.ptcOrder(line, true) }
+
+// ptcOrder is PTCOrder; announce says whether an admitted order is broadcast.
+// Orders put back after a reorganisation are admitted by the same checks and
+// are not announced: every node does the same for itself.
+func (n *Node) ptcOrder(line string, announce bool) string {
 	num, ok := codec.StrToInt(codec.Parameter(line, 5))
 	if !ok {
 		return ""
@@ -446,7 +451,7 @@ func (n *Node) PTCOrder(line string) string {
 		if !n.AddPoolGroup(trx) {
 			return "ERROR 104" // pool full, or too old for this period
 		}
-		if n.Broadcast != nil && n.serverActive() {
+		if announce && n.Broadcast != nil && n.serverActive() {
 			n.Broadcast(tb)
 		}
 		return codec.Parameter(tb, 7)
@@ -468,7 +473,9 @@ func PTCHeader(n *Node) string {
 // L-03): the fee must equal the exact custom fee and no amount may move, the
 // alias rules are enforced here, the ids are derived from the signed data
 // and an unparsable order is an error (the original answered 0, success).
-func (n *Node) PTCCustom(line string) int {
+func (n *Node) PTCCustom(line string) int { return n.ptcCustom(line, true) }
+
+func (n *Node) ptcCustom(line string, announce bool) int {
 	o, ok := types.ParseOrder(line)
 	if !ok {
 		return 17
@@ -514,7 +521,7 @@ func (n *Node) PTCCustom(line string) int {
 	if code == 0 {
 		op := codec.GetOpData(line)
 		n.AddPool(o)
-		if n.Broadcast != nil && n.serverActive() {
+		if announce && n.Broadcast != nil && n.serverActive() {
 			n.Broadcast(PTCHeader(n) + op)
 		}
 	}
@@ -524,7 +531,9 @@ func (n *Node) PTCCustom(line string) int {
 // PTCSendGVT mirrors PTC_SendGVT (mpprotocol.pas:956-985). FIX(M-14, L-03):
 // the OWNER of the GVT authorises the transfer with their own key (the
 // original demanded the developer key, which froze every owner's GVT).
-func (n *Node) PTCSendGVT(line string) int {
+func (n *Node) PTCSendGVT(line string) int { return n.ptcSendGVT(line, true) }
+
+func (n *Node) ptcSendGVT(line string, announce bool) int {
 	o, ok := types.ParseOrder(line)
 	if !ok {
 		return 17
@@ -572,7 +581,7 @@ func (n *Node) PTCSendGVT(line string) int {
 	if code == 0 {
 		op := codec.GetOpData(line)
 		n.AddPool(o)
-		if n.Broadcast != nil && n.serverActive() {
+		if announce && n.Broadcast != nil && n.serverActive() {
 			n.Broadcast(PTCHeader(n) + op)
 		}
 	}

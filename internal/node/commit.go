@@ -61,7 +61,7 @@ func (n *Node) beginJournal(restore string, last int64) error {
 }
 
 // commitJournal is stage 2, the commit point.
-func (n *Node) commitJournal(restore string, last, start int64, blocks map[int64][]byte) error {
+func (n *Node) commitJournal(restore string, last, start int64, blocks map[int64][]byte, abandoned map[int64][]byte) error {
 	if err := os.RemoveAll(n.journalDir()); err != nil {
 		return err
 	}
@@ -73,6 +73,9 @@ func (n *Node) commitJournal(restore string, last, start int64, blocks map[int64
 		if err := storage.WriteFileAtomic(filepath.Join(n.journalDir(), codec.IntToStr(num)+".blk"), raw); err != nil {
 			return err
 		}
+	}
+	if err := n.writeAbandoned(abandoned); err != nil {
+		return err
 	}
 	syncDir(n.journalDir())
 	syncDir(n.Lay.Root)
@@ -91,6 +94,7 @@ func (n *Node) endJournal() {
 // recoverLocked completes or discards an interrupted change, then checks that
 // the state belongs to the chain and replays the chain when it does not.
 func (n *Node) recoverLocked() error {
+	var abandoned map[int64][]byte
 	raw, err := os.ReadFile(n.journalPath())
 	if err == nil {
 		var j journal
@@ -129,6 +133,8 @@ func (n *Node) recoverLocked() error {
 			n.chainState.replaying = false
 			if err != nil {
 				n.logf("exceps", "journal replay: "+err.Error())
+			} else {
+				abandoned = n.readAbandoned()
 			}
 		}
 		n.endJournal()
@@ -137,7 +143,13 @@ func (n *Node) recoverLocked() error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return n.repairLocked("")
+	rerr := n.repairLocked("")
+	if len(abandoned) > 0 && rerr == nil {
+		// A reorganisation was finished from the journal: the orders of the
+		// blocks it replaced go back into the pool.
+		n.readmit(abandoned)
+	}
+	return rerr
 }
 
 // cutChainFrom removes the blocks and header records from number from upward.

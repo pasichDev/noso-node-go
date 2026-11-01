@@ -125,7 +125,7 @@ func TestRE2_JournalRecovery(t *testing.T) {
 	if _, _, err := f.evalBlock(blk, prev, f.MyLastBlockHash(), map[string]bool{}, "c3"); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.commitJournal("c3", 2, 3, map[int64][]byte{3: raw}); err != nil {
+	if err := f.commitJournal("c3", 2, 3, map[int64][]byte{3: raw}, nil); err != nil {
 		t.Fatal(err)
 	}
 	f.chainMu.Unlock()

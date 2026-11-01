@@ -256,9 +256,16 @@ full pool refuses a new order; an order is admitted when it is dated no more tha
 free censorship, not paid censorship: a user with funds can fill the pool with
 valid orders dated at the start of a period; about 2000 are mined (their fees go
 to the proposer) and the rest are dropped unpaid at the next block, so honest
-orders are delayed for a period at a small price. There is no fee market. Reorganised
-away orders are not put back; a sender whose order vanished with an abandoned
-block sends it again.
+orders are delayed for a period at a small price. There is no fee market. When a heavier branch
+replaces some of our blocks, the user orders of the abandoned blocks go back into
+the pool through the same admission checks as an order from a peer (signature,
+funds, time window, minimum fee, not already mined), without being announced:
+an order that is no longer valid on the new tip, or that the new branch mined, is
+dropped. The raw abandoned blocks are kept in the journal of the change, so a
+crash after its commit point finds them at the next start and puts the orders
+back once. The pool itself is not consensus state and is not persisted: an
+order that is in the pool when the node stops is gone (`TestReorgPutsValidOrdersBack`,
+`TestReorgDoesNotReAddMinedOrExpiredOrders`, `TestReorgCrashEveryPoint`).
 
 ## Order lookup
 

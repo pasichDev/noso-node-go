@@ -400,8 +400,15 @@ func (n *Node) acceptRunLocked(byNum map[int64][]byte) (int, error) {
 	for _, c := range cands {
 		blocks[c.blk.Header.Number] = c.raw
 	}
+	// The orders of the blocks this branch replaces go back to the pool once
+	// it is in place; they are kept in the journal until then, because the old
+	// blocks are deleted past the commit point.
+	var abandoned map[int64][]byte
+	if start <= last && !replaying {
+		abandoned = n.abandonedRaw(start, last, cands[len(cands)-1].blk.Header.TimeStart)
+	}
 	if !replaying {
-		if err := n.commitJournal("c"+codec.IntToStr(start), last, start, blocks); err != nil {
+		if err := n.commitJournal("c"+codec.IntToStr(start), last, start, blocks, abandoned); err != nil {
 			putBack()
 			return 0, err
 		}
@@ -422,17 +429,6 @@ func (n *Node) acceptRunLocked(byNum map[int64][]byte) (int, error) {
 	for _, c := range cands {
 		n.promoteSnapshot(c.blk.Header.Number)
 	}
-	if !replaying {
-		n.endJournal()
-	}
-	tip := start + int64(len(cands)) - 1
-	n.Summary.SetLastOp(tip)
-	n.Summary.SetHash()
-	n.Headers.SetHash()
-	n.noteTip(tip)
-	n.pruneSnapshots(tip)
-	n.setProbe(false)
-	n.clearStaged()
 	// The pool follows the chain on every node, builder or not.
 	var mined []map[string]bool
 	for _, c := range cands {
@@ -445,6 +441,20 @@ func (n *Node) acceptRunLocked(byNum map[int64][]byte) (int, error) {
 		}
 	}
 	n.pruneMined(all, cands[len(cands)-1].blk.Header)
+	// The orders of the replaced blocks come back before the journal is
+	// dropped: until then a crash finds them in it.
+	n.readmit(abandoned)
+	if !replaying {
+		n.endJournal()
+	}
+	tip := start + int64(len(cands)) - 1
+	n.Summary.SetLastOp(tip)
+	n.Summary.SetHash()
+	n.Headers.SetHash()
+	n.noteTip(tip)
+	n.pruneSnapshots(tip)
+	n.setProbe(false)
+	n.clearStaged()
 	n.RefreshWalletBalances()
 	// A new period begins: reports and lists of the old one are void.
 	n.ClearMNsChecks()

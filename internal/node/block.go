@@ -504,7 +504,7 @@ func (n *Node) buildLocked(number, timestamp int64, targetHash, miner, solution 
 		blk.Header.Solution = solutionFor(n.stateRoot(), proposersDigest(n.Proposers()))
 		sealBlock(blk, sw.PublicKey, sw.PrivateKey)
 		raw := blk.Encode()
-		if err := n.commitJournal(label, myLast, number, map[int64][]byte{number: raw}); err != nil {
+		if err := n.commitJournal(label, myLast, number, map[int64][]byte{number: raw}, nil); err != nil {
 			rollback(false)
 			return nil, err
 		}
