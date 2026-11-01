@@ -55,10 +55,25 @@ func (e *Engine) isSelf(ip, port string) bool {
 	return isLoopback(ip) || ip == e.N.Options().MNIP
 }
 
+// heardEnough reports whether at least `need` authenticated peers are
+// connected, whatever they claim. A proposer builds on its own verified state
+// once it has heard from its peers; their claims about their height do not
+// gate building (final review F-2).
+func (e *Engine) heardEnough(need int) bool {
+	heard := 0
+	for i := 1; i <= MaxConnections; i++ {
+		if e.IsSlotConnected(i) && e.peers.get(i).Autentic {
+			heard++
+		}
+	}
+	return heard >= need
+}
+
 // caughtUp reports whether no authenticated peer is ahead of us or on a tip
 // we have not weighed against ours. It is derived from what the peers say in
 // their PING, never from a vote: the blocks themselves are checked when they
-// are fetched.
+// are fetched. A claim holds the status back only while it is plausible and
+// its sender has not been caught answering with nothing (claimCounts).
 func (e *Engine) caughtUp(need int) bool {
 	n := e.N
 	myLast := n.MyLastBlock()
@@ -73,10 +88,13 @@ func (e *Engine) caughtUp(need int) bool {
 		}
 		authentic++
 		pl := codec.StrToInt64Def(p.LastBlock, -1)
-		if pl > myLast {
+		// A claim is a hint, not a fact: it holds the node back only when that
+		// connection has already delivered valid blocks and the height is one
+		// the chain clock allows (see claimCounts).
+		if pl > myLast && e.claimCounts(i, pl) {
 			return false
 		}
-		if pl >= 0 && !e.sameBranchAt(pl, p.LastBlockHash) {
+		if pl >= 0 && pl <= myLast && !e.sameBranchAt(i, pl, p.LastBlockHash) && e.claimCounts(i, pl) {
 			return false
 		}
 	}
@@ -85,7 +103,7 @@ func (e *Engine) caughtUp(need int) bool {
 
 // sameBranchAt reports whether a peer's tip (number, hash) is a block of our
 // chain or has already been weighed against our tip and lost.
-func (e *Engine) sameBranchAt(num int64, hash string) bool {
+func (e *Engine) sameBranchAt(sl int, num int64, hash string) bool {
 	if hash == "" || num > e.N.MyLastBlock() {
 		return true
 	}
@@ -94,7 +112,7 @@ func (e *Engine) sameBranchAt(num int64, hash string) bool {
 	}
 	e.syncMu.Lock()
 	defer e.syncMu.Unlock()
-	return e.rejected[hash+"|"+e.N.MyLastBlockHash()]
+	return e.rejected[e.rejectKey(sl, hash, e.N.MyLastBlockHash())]
 }
 
 // VerifyConnectionStatus sets the node state: 0 not connected, 1 connecting,
@@ -116,6 +134,9 @@ func (e *Engine) VerifyConnectionStatus() {
 			n.ClearPending()
 		}
 	}
+	e.mu.Lock()
+	e.canBuild = conns >= required && e.heardEnough(required)
+	e.mu.Unlock()
 	prev := n.ConStatus()
 	status := 3
 	switch {

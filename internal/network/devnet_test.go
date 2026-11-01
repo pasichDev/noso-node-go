@@ -70,6 +70,7 @@ func newDevnet(t *testing.T, n, proposers int, speed int64) *devnet {
 			}
 		}
 		e.Log = nd.Log
+		e.BindAddr = "127.0.0.1" // the test network never leaves loopback
 		e.Wall = func() int64 { return time.Now().Unix() }
 		d.eng = append(d.eng, e)
 	}
@@ -83,10 +84,8 @@ func newDevnet(t *testing.T, n, proposers int, speed int64) *devnet {
 	}
 	for i, nd := range d.nodes {
 		seeds := ""
-		for j, p := range d.ports {
-			if j != i {
-				seeds += fmt.Sprintf("127.0.0.1;%d:", p)
-			}
+		for _, p := range d.ports { // the same list on every node, itself included, as init-network writes it
+			seeds += fmt.Sprintf("127.0.0.1;%d:", p)
 		}
 		nd.CFG.Save("NORMAL " + seeds + " null: null: null: NpryectdevepmentfundsGE:")
 		nd.UpdateOptions(func(o *node.StorageOptions) { o.MNPort = fmt.Sprint(d.ports[i]) })
@@ -188,6 +187,7 @@ func (d *devnet) restart(i int) {
 	nd := d.nodes[i]
 	e := NewEngine(nd)
 	e.Wall = func() int64 { return time.Now().Unix() }
+	e.BindAddr = "127.0.0.1"
 	e.Log = nd.Log
 	d.eng[i] = e
 	e.Start()

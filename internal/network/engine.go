@@ -53,6 +53,10 @@ type Engine struct {
 
 	myPublicIP string
 
+	mnMu         sync.Mutex
+	mnFundsBlock int64
+	mnFunds      map[string]bool // funds that already have a report queued this block
+
 	// rate limits (function level `const` variables of the Pascal code)
 
 	// request throttles (nosonetwork.pas:155-167)
@@ -67,12 +71,22 @@ type Engine struct {
 	statusConnected                                                     bool
 	rebuildingSumary                                                    bool
 	buildNMSBlock                                                       int64
+	canBuild                                                            bool
 	mnsRandomWait                                                       int64
 	engineLastUpdate                                                    int64
 
 	// MinPeers is the connection count that moves the node from state 1 to
 	// 2. It is 3 on the real network (mpred.pas:499); tests lower it.
 	MinPeers int
+
+	// BindAddr is the local address the peer listener binds to. Empty means
+	// every interface (a public node); a test network or a node that must stay
+	// on one machine sets it to 127.0.0.1 (nosod -bind).
+	BindAddr string
+
+	// TraceOrder, when set, receives every order line SendFunds hands to a
+	// node (tests only: the raw signed order is not printed to the user).
+	TraceOrder func(line string)
 
 	// Dial opens outgoing connections; replaceable for tests.
 	Dial func(addr string, timeout time.Duration) (net.Conn, error)
@@ -93,6 +107,7 @@ type Engine struct {
 	conns    map[*Conn]struct{} // accepted connections that are not peers yet
 	rejected map[string]bool    // peer tip|own tip pairs that were weighed and lost
 	pullAt   int64
+	pullSeq  uint64
 
 	Log func(ch, msg string)
 
@@ -116,7 +131,7 @@ type Engine struct {
 
 // NewEngine builds an engine around a node and wires the node hooks.
 func NewEngine(n *node.Node) *Engine {
-	e := &Engine{N: n, MinPeers: DefaultMinPeers, bots: map[string]int64{}, ipCtl: map[string]int{},
+	e := &Engine{N: n, MinPeers: DefaultMinPeers, mnFunds: map[string]bool{}, mnFundsBlock: -1, bots: map[string]int64{}, ipCtl: map[string]int{},
 		stop: make(chan struct{}), denied: map[string]bool{}, peerSync: map[*slot]*pullState{}, rejected: map[string]bool{}, conns: map[*Conn]struct{}{},
 		expect: map[expectKey]int64{}, fileLast: map[string]int64{}, heavy: map[string][]int64{}, lineLog: map[int][]int64{}, bulkLog: map[int][]int64{},
 		byteWin: map[int]*window{}, mnRepoWin: map[int]*window{}, sendSlots: make(chan struct{}, maxSendsAtOnce)}
@@ -421,6 +436,9 @@ func (e *Engine) filePermit(kind, ip string) bool {
 
 // heavyOK allows a peer ten costly one-shot requests per minute (M-08).
 func (e *Engine) heavyOK(ip string) bool {
+	if isLoopback(ip) {
+		return true // every local node shares the address; see isLoopback
+	}
 	now := e.now()
 	e.limMu.Lock()
 	defer e.limMu.Unlock()

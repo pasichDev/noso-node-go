@@ -10,6 +10,7 @@ import (
 	"github.com/pasichDev/noso-node-go/internal/consensus"
 	"github.com/pasichDev/noso-node-go/internal/node"
 	"github.com/pasichDev/noso-node-go/internal/storage"
+	"github.com/pasichDev/noso-node-go/internal/types"
 )
 
 type clock struct{ v atomic.Int64 }
@@ -69,8 +70,11 @@ func TestLoopbackSync(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			o.OrderID = "ORtest" + strconv.Itoa(int(i))
-			if !a.AddPool(o) {
+			sealed, err := a.SealOrder([]types.Order{o})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !a.AddPoolGroup(sealed) {
 				t.Fatal("pool")
 			}
 		}
@@ -85,6 +89,7 @@ func TestLoopbackSync(t *testing.T) {
 
 	ea, eb := NewEngine(a), NewEngine(b)
 	ea.MinPeers, eb.MinPeers = 1, 1
+	ea.BindAddr = "127.0.0.1"
 	if err := ea.StartServer(0); err != nil {
 		t.Fatal(err)
 	}
@@ -139,6 +144,7 @@ func TestIncomingChecks(t *testing.T) {
 	n := mkNode(t, &clk)
 	e := NewEngine(n)
 	n.SetConStatus(3)
+	e.BindAddr = "127.0.0.1"
 	if err := e.StartServer(0); err != nil {
 		t.Fatal(err)
 	}

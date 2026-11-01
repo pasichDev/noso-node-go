@@ -24,6 +24,51 @@ func (p Printer) say(format string, a ...any) {
 	}
 }
 
+// ParseAmount converts a user-typed amount to base units (1 NOSO =
+// 100000000 units), exactly and without floating point. "1", "1.5" and
+// "0.00000001" are NOSO (at most 8 decimals); a trailing u gives base units
+// ("150000000u"). It refuses signs, exponents, spaces and anything that does
+// not fit.
+func ParseAmount(s string) (int64, error) {
+	const unit = 100000000
+	if s == "" {
+		return 0, fmt.Errorf("no amount")
+	}
+	if units, ok := strings.CutSuffix(s, "u"); ok {
+		v, ok := codec.StrToInt64(units)
+		if !ok || v <= 0 || !digitsOnly(units) {
+			return 0, fmt.Errorf("%q is not a whole number of base units", s)
+		}
+		return v, nil
+	}
+	whole, frac, _ := strings.Cut(s, ".")
+	if whole == "" || !digitsOnly(whole) || (frac != "" && !digitsOnly(frac)) || strings.HasSuffix(s, ".") {
+		return 0, fmt.Errorf("%q is not an amount in NOSO", s)
+	}
+	if len(frac) > 8 {
+		return 0, fmt.Errorf("%q has more than 8 decimals", s)
+	}
+	frac += strings.Repeat("0", 8-len(frac))
+	w, ok := codec.StrToInt64(whole)
+	if !ok || w > consensus.MaxSupply/unit {
+		return 0, fmt.Errorf("%q is too large", s)
+	}
+	f, _ := codec.StrToInt64(frac)
+	if v := w*unit + f; v > 0 {
+		return v, nil
+	}
+	return 0, fmt.Errorf("the amount must be above zero")
+}
+
+func digitsOnly(s string) bool {
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return s != ""
+}
+
 // WalletBalance mirrors GetWalletBalance (mpparser.pas:~395): the sum of the
 // summary balances of every wallet address minus our outgoing pendings.
 func (e *Engine) WalletBalance() int64 {
@@ -98,7 +143,7 @@ func (e *Engine) SendFunds(line string, say Printer, startIdx int) string {
 	for monto > 0 {
 		w := n.Wallet.At(idx)
 		if strings.Contains(senders, w.Hash) {
-			say.say("Duplicated address on order")
+			say.say("The wallet cannot cover this amount and fee right now: orders still waiting to be mined hold part of the balance. Try again after the next block.")
 			return ""
 		}
 		senders += w.Hash
@@ -118,18 +163,25 @@ func (e *Engine) SendFunds(line string, say Printer, startIdx int) string {
 			idx = 0
 		}
 	}
-	orderID := crypto.GetOrderHash(codec.IntToStr(int64(line_)) + orderHashString)
-	for i := range trfrs {
-		trfrs[i].OrderID = orderID
-		trfrs[i].OrderLines = int32(line_)
+	_ = orderHashString
+	// the lines are numbered, signed with the line count and given the id
+	// derived from all of them: the pool, the builder and the validators check
+	// exactly that
+	trfrs, err := n.SealOrder(trfrs)
+	if err != nil {
+		say.say("The order could not be built: %v", err)
+		return ""
 	}
+	orderID := trfrs[0].OrderID
 	os := node.PTCHeader(n) + "ORDER " + codec.IntToStr(int64(line_)) + " $"
 	for _, o := range trfrs {
 		os += types.StringFromOrder(o) + " $"
 	}
 	os = os[:len(os)-2]
 	os = strings.Replace(os, "PSK", "NSLORDER", 1)
-	say.say("Send to Node %s", os)
+	if e.TraceOrder != nil {
+		e.TraceOrder(os)
+	}
 	res := e.SendOrderToNode(os)
 	if strings.HasPrefix(res, "ERROR") {
 		// FIX(M2): the order was not accepted by any node; it is neither
@@ -142,10 +194,14 @@ func (e *Engine) SendFunds(line string, say Printer, startIdx int) string {
 	return res
 }
 
-// SendGVT mirrors SendGVT (mpparser.pas:~870-935).
+// SendGVT mirrors SendGVT (mpparser.pas:~870-935). The order is signed with
+// the canonical GVT number (the builder and the validators read nothing
+// else), admitted to this node's pool exactly as a received one is and
+// announced to the peers, whose dispatcher takes it as `$SNDGVT`.
 func (e *Engine) SendGVT(line string, say Printer) string {
 	n := e.N
-	num := int(codec.StrToIntDef(codec.Parameter(line, 1), -1))
+	arg := codec.Parameter(line, 1)
+	num := int(codec.StrToIntDef(arg, -1))
 	dest := codec.Parameter(line, 2)
 	if num < 0 || num > n.GVTs.Len()-1 {
 		say.say("Invalid GVT number")
@@ -156,7 +212,8 @@ func (e *Engine) SendGVT(line string, say Printer) string {
 		say.say("You do not own that GVT")
 		return ""
 	}
-	if n.AddressAvailable(g.Owner) < consensus.GetCustFee(n.MyLastBlock()) {
+	fee := consensus.GetCustFee(n.MyLastBlock() + 1)
+	if n.AddressAvailable(g.Owner) < fee {
 		say.say("Inssuficient funds")
 		return ""
 	}
@@ -174,18 +231,39 @@ func (e *Engine) SendGVT(line string, say Printer) string {
 	}
 	w := n.Wallet.At(n.Wallet.IndexOf(g.Owner))
 	ts, _ := codec.StrToInt64(n.UTCTimeStr())
-	o := types.Order{OrderLines: 1, OrderType: "SNDGVT", TimeStamp: ts, Reference: g.Number, TrxLine: 1,
-		Sender: w.PublicKey, Address: w.Hash, Receiver: dest, AmmountFee: consensus.GetCustFee(n.MyLastBlock())}
+	// FIX(GAP-3): the reference is the canonical number ("5"), not the file's
+	// zero-padded "05", which the builder refuses.
+	o := types.Order{OrderLines: 1, OrderType: "SNDGVT", TimeStamp: ts, Reference: codec.IntToStr(int64(num)), TrxLine: 1,
+		Sender: w.PublicKey, Address: w.Hash, Receiver: dest, AmmountFee: fee}
 	node.SignOrder(&o, w.PrivateKey)
 	o.OrderID = node.SingleOrderID(o.TrfrID)
 	o.Normalize()
-	e.OutgoingAdd(e.ProtocolLine(0) + "$" + types.StringFromOrder(o))
-	say.say("GVT %s transfered from %s to %s\nOrder: %s", g.Number, w.Hash, dest, o.OrderID)
+	return e.admitSingle(say, "SNDGVT", o, n.PTCSendGVT, func() string {
+		return fmt.Sprintf("GVT %s transfered from %s to %s\nOrder: %s", o.Reference, w.Hash, dest, o.OrderID)
+	})
+}
+
+// admitSingle puts a CUSTOM or SNDGVT order into this node's pool through the
+// same admission as one received from a peer, and tells the peers when the
+// node itself did not (a node that does not serve announces nothing on its
+// own). It returns the order id, "" when the order was refused.
+func (e *Engine) admitSingle(say Printer, what string, o types.Order, admit func(string) int, done func() string) string {
+	op := "$" + types.StringFromOrder(o)
+	if code := admit(op); code != 0 {
+		say.say("The %s order was refused (code %d)", what, code)
+		return ""
+	}
+	if !e.ServerActive() {
+		e.OutgoingAdd(node.PTCHeader(e.N) + op)
+	}
+	say.say("%s", done())
 	return o.OrderID
 }
 
 // Customize mirrors CustomizeAddress (mpparser.pas:~640-720) combined with
-// the crypto worker that signs and broadcasts the CUSTOM order.
+// the crypto worker that signs and broadcasts the CUSTOM order. The funds are
+// checked against the summary, the same balance the pool admits the order
+// against (FIX(GAP-4): the wallet record's own Balance is never maintained).
 func (e *Engine) Customize(line string, say Printer) bool {
 	n := e.N
 	addr, alias := codec.Parameter(line, 1), codec.Parameter(line, 2)
@@ -193,9 +271,10 @@ func (e *Engine) Customize(line string, say Printer) bool {
 	idx := n.Wallet.IndexOf(addr)
 	if idx < 0 {
 		say.say("Invalid address")
-		ok = false
+		return false
 	}
 	w := n.Wallet.At(idx)
+	fee := consensus.GetCustFee(n.MyLastBlock() + 1)
 	if w.Custom != "" {
 		say.say("Address already have a custom alias")
 		ok = false
@@ -208,7 +287,7 @@ func (e *Engine) Customize(line string, say Printer) bool {
 		say.say("Alias can not be a valid address")
 		ok = false
 	}
-	if w.Balance < consensus.GetCustFee(n.MyLastBlock()) {
+	if n.AddressAvailable(w.Hash) < fee {
 		say.say("Insufficient balance")
 		ok = false
 	}
@@ -231,13 +310,11 @@ func (e *Engine) Customize(line string, say Printer) bool {
 	}
 	ts, _ := codec.StrToInt64(n.UTCTimeStr())
 	o := types.Order{OrderLines: 1, OrderType: "CUSTOM", TimeStamp: ts, Reference: "null", TrxLine: 1,
-		Sender: w.PublicKey, Address: w.Hash, Receiver: alias, AmmountFee: consensus.GetCustFee(n.MyLastBlock())}
+		Sender: w.PublicKey, Address: w.Hash, Receiver: alias, AmmountFee: fee}
 	node.SignOrder(&o, w.PrivateKey)
 	o.OrderID = node.SingleOrderID(o.TrfrID)
 	o.Normalize()
-	e.OutgoingAdd(e.ProtocolLine(0) + "$" + types.StringFromOrder(o))
-	say.say("Customization sent")
-	return true
+	return e.admitSingle(say, "CUSTOM", o, n.PTCCustom, func() string { return "Customization sent" }) != ""
 }
 
 // NewAddress mirrors the crypto thread's address generation (tipo 1).
@@ -362,14 +439,36 @@ func Int2Curr(v int64) string {
 
 var _ = storage.FundsAddress
 
-func sendErrorText(res string) string {
-	switch res {
-	case "ERROR 19":
-		return "could not connect to a node"
-	case "ERROR 20":
-		return "this node is not up to date yet"
-	case "ERROR 21":
-		return "no answer from the node"
+// OrderErrorText explains the answer of a node to an order ("ERROR n").
+func OrderErrorText(res string) string {
+	m := map[string]string{
+		"ERROR 1":   "not enough spendable funds (amount plus fee, minus orders still waiting for a block)",
+		"ERROR 2":   "the same order is already waiting",
+		"ERROR 3":   "the order is older than the last block",
+		"ERROR 4":   "the last block ended more than 10 minutes ago, so no new order is accepted until the next block arrives; a proposer is probably down, try again in a few minutes",
+		"ERROR 5":   "the same order was mined recently",
+		"ERROR 7":   "negative amount",
+		"ERROR 8":   "negative fee",
+		"ERROR 9":   "the sender is not a valid address",
+		"ERROR 10":  "the receiver is not a regular address",
+		"ERROR 11":  "the sender address is locked",
+		"ERROR 12":  "the network is stopped",
+		"ERROR 13":  "the sender does not match the signing key",
+		"ERROR 15":  "amount plus fee overflows",
+		"ERROR 16":  "wrong order type",
+		"ERROR 19":  "could not connect to a node",
+		"ERROR 20":  "this node is not up to date yet",
+		"ERROR 21":  "no answer from the node",
+		"ERROR 89":  "more than 30 lines",
+		"ERROR 96":  "the order could not be parsed",
+		"ERROR 102": "bad reference or several receivers in one order",
+		"ERROR 103": "the lines of the order disagree",
+		"ERROR 104": "the pool is full or the order is too old for this period",
+	}
+	if t, ok := m[strings.TrimSpace(res)]; ok {
+		return t
 	}
 	return "refused"
 }
+
+func sendErrorText(res string) string { return OrderErrorText(res) }

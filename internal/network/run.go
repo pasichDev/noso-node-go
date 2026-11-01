@@ -90,11 +90,14 @@ func (e *Engine) Tick() {
 	e.mu.Lock()
 	e.engineLastUpdate = n.UTCTime()
 	build := e.buildNMSBlock
+	canBuild := e.canBuild
 	e.mu.Unlock()
-	// FIX(C1, H-5): the builder needs to be up to date with its peers
-	// (state 3), not to hold the block the seeds voted for. A proposer that is
-	// ahead of the vote is the normal case, since nobody else has its block yet.
-	if n.Options().BuildBlocks && n.InTurn(build) && n.UTCTime() >= build && build > 0 && n.ConStatus() == 3 {
+	// FIX(C1, H-5, F-2): the builder needs to be connected to enough peers it
+	// has heard from, not to hold the block the seeds voted for and not to be
+	// "caught up" with whatever height a peer claims: a claim is an
+	// unauthenticated number and must not stop a proposer. It builds on its
+	// own verified state; a branch that turns out better wins by its weight.
+	if n.Options().BuildBlocks && n.InTurn(build) && n.UTCTime() >= build && build > 0 && (n.ConStatus() == 3 || canBuild) {
 		e.logf("events", "Starting construction of block "+codec.IntToStr(n.MyLastBlock()+1))
 		_, err := n.BuildNewBlock(n.MyLastBlock()+1, build, n.MyLastBlockHash(), BuildMiner, BuildSolution)
 		if err != nil {
@@ -299,6 +302,19 @@ func (e *Engine) queueMNReport(line string) {
 	if n.WaitingMNsLen() >= maxWaitingMNs {
 		return
 	}
+	// FIX(F-5): one queued report per fund and block. A staked key could
+	// otherwise sign reports naming any number of other nodes' IPs; each one
+	// that is queued uses up that IP's slot for the block.
+	e.mnMu.Lock()
+	if e.mnFundsBlock != block {
+		e.mnFundsBlock, e.mnFunds = block, map[string]bool{}
+	}
+	if e.mnFunds[m.Fund] {
+		e.mnMu.Unlock()
+		return
+	}
+	e.mnFunds[m.Fund] = true
+	e.mnMu.Unlock()
 	n.AddWaitingMN(line)
 }
 

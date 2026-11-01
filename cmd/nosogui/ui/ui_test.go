@@ -15,6 +15,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/pasichDev/noso-node-go/internal/crypto"
+	"github.com/pasichDev/noso-node-go/internal/node"
 )
 
 // shotDir is where the screenshots go: NOSO_GUI_SHOTS, or nowhere.
@@ -125,6 +126,7 @@ func TestSendFromSelectedAddress(t *testing.T) {
 		t.Fatal("send did not ask for confirmation")
 	}
 	shot(t, a, "wallet-confirm")
+	a.e.TraceOrder = func(l string) { a.appendLog("console", "Send to Node "+l) }
 	test.Tap(a.confBtn)
 	waitFor(t, "order line in the console", func() bool { return strings.Contains(a.consoleText(), "Send to Node") })
 	var order string
@@ -195,5 +197,27 @@ func TestShutdownOnce(t *testing.T) {
 	}
 	if _, err := os.Stat(a.n.Lay.ClosedMarker); err != nil {
 		t.Fatalf("closed marker missing: %v", err)
+	}
+}
+
+// The "No GUI refresh" option (NoGUI) keeps the tables and the balance still;
+// only the status bar goes on. Unchecking it brings them up to date again.
+func TestNoGUIOptionStopsTheRefresh(t *testing.T) {
+	a := newTestApp(t)
+	a.refresh()
+	before := a.balance.Text
+	a.n.UpdateOptions(func(o *node.StorageOptions) { o.NoGUI = true })
+	a.n.Summary.CreditTo(a.n.Wallet.At(0).Hash, 5_000_000_000, 2)
+	if err := a.n.Summary.UpdateChanges(); err != nil {
+		t.Fatal(err)
+	}
+	a.refresh()
+	if a.balance.Text != before {
+		t.Fatalf("NoGUI is set, but the balance was refreshed: %q -> %q", before, a.balance.Text)
+	}
+	a.n.UpdateOptions(func(o *node.StorageOptions) { o.NoGUI = false })
+	a.refresh()
+	if a.balance.Text == before {
+		t.Fatal("the refresh did not resume")
 	}
 }

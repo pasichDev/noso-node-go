@@ -37,7 +37,7 @@ func (e *Engine) StartServer(port int) error {
 		return nil
 	}
 	e.mu.Unlock()
-	ln, err := net.Listen("tcp", net.JoinHostPort("", codec.IntToStr(int64(port))))
+	ln, err := net.Listen("tcp", net.JoinHostPort(e.BindAddr, codec.IntToStr(int64(port))))
 	if err != nil {
 		return err
 	}
@@ -538,6 +538,14 @@ func (e *Engine) ParseProtocolLines() {
 			case cmd == "$CUSTOM":
 				if e.AddIPControl(peer.IP) < 100 {
 					n.PTCCustom(codec.GetOpData(line))
+				} else {
+					e.spammer(sl, peer.IP)
+				}
+			case cmd == "$SNDGVT":
+				// FIX(GAP-3): the dispatcher had no case for it (nor had the
+				// original), so a GVT transfer was announced and dropped.
+				if e.AddIPControl(peer.IP) < 100 {
+					n.PTCSendGVT(codec.GetOpData(line))
 				} else {
 					e.spammer(sl, peer.IP)
 				}

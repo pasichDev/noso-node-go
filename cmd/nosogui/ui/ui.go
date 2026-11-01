@@ -197,7 +197,7 @@ func (a *App) startNode(pass []byte, plain bool, step func(string)) error {
 	for _, w := range n.Wallet.Warnings() {
 		a.appendLog("console", w)
 	}
-	if ctl, err := control.Serve(control.SocketPath(a.dataDir), func(line string, out func(string)) { a.d.RunTo(line, out) }); err == nil {
+	if ctl, err := control.Serve(control.SocketPath(a.dataDir), a.d.ControlRunner(pass)); err == nil {
 		a.ctl = ctl
 	} else {
 		a.appendLog("console", "control socket unavailable: "+err.Error())
@@ -352,6 +352,11 @@ func (a *App) refresh() {
 	a.status.SetText(fmt.Sprintf("%s | peers %d (synced %d) | block %d | pending %d | server %s | rpc %s | %s",
 		conn, e.TotalConnections(), e.SyncedConnections(), n.MyLastBlock(), n.PendingCount(), srv, rp,
 		time.Unix(n.UTCTime(), 0).UTC().Format("2006-01-02 15:04:05")))
+	if n.Options().NoGUI {
+		// WO_StopGUI: only the status bar is kept current; the tables, the
+		// balance and the logs are not rebuilt every second.
+		return
+	}
 	a.balance.SetText(network.Int2Curr(e.WalletBalance()) + " NOSO")
 	// wallet grid
 	a.addrRows = a.addrRows[:0]

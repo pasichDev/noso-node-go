@@ -5,9 +5,9 @@ import (
 	"bytes"
 	"errors"
 	"os"
-	"strings"
 
 	"github.com/pasichDev/noso-node-go/internal/codec"
+	"github.com/pasichDev/noso-node-go/internal/consensus"
 	"github.com/pasichDev/noso-node-go/internal/node"
 )
 
@@ -17,7 +17,13 @@ import (
 // have at that height, we ask it for blocks. Nothing here counts votes. The
 // answer is handed to node.StageBlocks, which accepts only blocks sealed by a
 // proposer and valid against the state, and settles forks by the chain weight.
-// A false claim costs one request, never a connection.
+// A claim is only a hint where to ask. It never changes the node's status and
+// never stops a proposer building: the node counts a peer as ahead only after
+// that connection delivered blocks that checked out, and only up to the height
+// the chain clock allows. Peers are asked in turn, not by the highest claim; a
+// peer that answers with nothing, or with blocks that do not continue the
+// chain, is held back for longer each time. A false claim costs one request,
+// never a connection.
 
 // pullState is what the puller remembers about one connection.
 type pullState struct {
@@ -26,6 +32,61 @@ type pullState struct {
 	peerTip string // tip the last request was about
 	probed  bool   // already retried once from before our tip
 	strikes int    // invalid blocks received on this connection
+
+	delivered  int    // valid blocks this connection has delivered
+	faults     int    // empty or wrong-parent answers since the last delivery
+	holdUntil  int64  // not asked again before this time
+	askSeq     uint64 // when it was last asked, in turns (rotation)
+	askedAhead bool   // the last request followed a claim above our tip
+}
+
+// holdFor is how long a connection with n faults is not asked again: 10
+// seconds for the first, doubled for each further one, at most 5 minutes.
+func holdFor(n int) int64 {
+	if n < 1 {
+		return 0
+	}
+	if n > 6 {
+		n = 6
+	}
+	return int64(5 << uint(n)) // 10, 20, 40, 80, 160, 320
+}
+
+// fault records an answer that gave nothing and holds the peer back.
+func (st *pullState) fault(now int64) {
+	st.faults++
+	st.holdUntil = now + holdFor(st.faults)
+}
+
+// claimBound is the highest block number the chain can have reached by now:
+// at most one block per block period since the genesis time. A claim above it
+// is a lie and is ignored. (It is deliberately not relative to our own tip: a
+// node that sat on the short side of a partition has a recent tip and still
+// has to believe the longer chain.)
+func (e *Engine) claimBound() int64 {
+	gap := e.N.UTCTime() - consensus.GenesysTimeStamp
+	if gap < 0 {
+		gap = 0
+	}
+	return gap/consensus.SecondsPerBlock + 2
+}
+
+// claimCounts reports whether the claim pl of the connection in slot sl may
+// hold the node's status back ("2, behind"): it is within claimBound and the
+// connection has not been caught giving nothing since it last delivered. The
+// status is a hint for the user and for sending orders; it never gates block
+// building (see Engine.buildGate).
+func (e *Engine) claimCounts(sl int, pl int64) bool {
+	if pl > e.claimBound() {
+		return false
+	}
+	s := e.slotObj(sl)
+	if s == nil {
+		return false
+	}
+	e.syncMu.Lock()
+	defer e.syncMu.Unlock()
+	return e.pullStateOf(s).faults == 0
 }
 
 // pullRetry is how long the same question (same peer tip, same own tip) is
@@ -55,7 +116,9 @@ func (e *Engine) pullStateOf(s *slot) *pullState {
 }
 
 // syncBlocks asks one peer for blocks when it is ahead of us or on another
-// branch. At most one request is in flight.
+// branch. At most one request is in flight. The peers that qualify take turns
+// (the one asked longest ago goes first), so no claim, however high, owns the
+// pull; a peer that was caught giving nothing is held back for a while.
 func (e *Engine) syncBlocks() {
 	n := e.N
 	if n.Building() > 0 {
@@ -64,8 +127,14 @@ func (e *Engine) syncBlocks() {
 	now := e.now()
 	e.syncMu.Lock()
 	defer e.syncMu.Unlock()
-	if e.pullSlot != nil && now < e.pullAt+pullTimeout {
-		return
+	if e.pullSlot != nil {
+		if now < e.pullAt+pullTimeout {
+			return
+		}
+		// no answer at all to a claim above our tip counts as an empty one
+		if st := e.peerSync[e.pullSlot]; st != nil && st.askedAhead {
+			st.fault(now)
+		}
 	}
 	e.pullSlot = nil
 	for s := range e.peerSync { // forget closed connections
@@ -74,7 +143,9 @@ func (e *Engine) syncBlocks() {
 		}
 	}
 	myLast, myTip := n.MyLastBlock(), n.MyLastBlockHash()
-	best, bestKind, bestLast := 0, 0, int64(-1)
+	bound := e.claimBound()
+	best, bestKind := 0, 0
+	var bestSt *pullState
 	for i := 1; i <= MaxConnections; i++ {
 		if !e.IsSlotConnected(i) {
 			continue
@@ -84,25 +155,30 @@ func (e *Engine) syncBlocks() {
 			continue
 		}
 		pl, ph := codec.StrToInt64Def(p.LastBlock, -1), p.LastBlockHash
-		if pl < 0 || ph == "" {
+		if pl < 0 || ph == "" || pl > bound {
 			continue
 		}
 		kind := 0
 		switch {
 		case pl > myLast:
 			kind = 1
-		case !e.sameBranchAtLocked(pl, ph, myTip):
+		case !e.sameBranchAtLocked(i, pl, ph, myTip):
 			kind = 2
 		}
 		if kind == 0 {
 			continue
 		}
 		st := e.pullStateOf(s)
+		if now < st.holdUntil {
+			continue
+		}
 		if st.key == ph+"|"+myTip && now < st.keyAt+pullRetry {
 			continue
 		}
-		if best == 0 || kind < bestKind || (kind == bestKind && pl > bestLast) {
-			best, bestKind, bestLast = i, kind, pl
+		if best == 0 || st.askSeq < bestSt.askSeq ||
+			(st.askSeq == bestSt.askSeq && (st.delivered > bestSt.delivered ||
+				(st.delivered == bestSt.delivered && kind < bestKind))) {
+			best, bestKind, bestSt = i, kind, st
 		}
 	}
 	if best == 0 {
@@ -112,7 +188,10 @@ func (e *Engine) syncBlocks() {
 	if s == nil {
 		return
 	}
-	st := e.pullStateOf(s)
+	st := bestSt
+	pl := codec.StrToInt64Def(e.peers.get(best).LastBlock, -1)
+	e.pullSeq++
+	st.askSeq, st.askedAhead = e.pullSeq, pl > myLast
 	st.key, st.keyAt, st.peerTip = e.peers.get(best).LastBlockHash+"|"+myTip, now, e.peers.get(best).LastBlockHash
 	if bestKind == 2 {
 		n.ProbeFork()
@@ -121,14 +200,21 @@ func (e *Engine) syncBlocks() {
 	e.requestBlocks(best)
 }
 
-func (e *Engine) sameBranchAtLocked(num int64, hash, myTip string) bool {
+// rejectKey names a tip that one connection showed and that lost against ours.
+// It is bound to the connection: a peer that claims a tip and answers with
+// nothing must not make us ignore the same tip on the connections that hold it.
+func (e *Engine) rejectKey(sl int, hash, myTip string) string {
+	return e.peerKey(sl) + "|" + hash + "|" + myTip
+}
+
+func (e *Engine) sameBranchAtLocked(sl int, num int64, hash, myTip string) bool {
 	if num > e.N.MyLastBlock() {
 		return true
 	}
 	if e.N.TipHashAt(num) == hash {
 		return true
 	}
-	return e.rejected[hash+"|"+myTip]
+	return e.rejected[e.rejectKey(sl, hash, myTip)]
 }
 
 // slotNumber returns the number of a slot object, 0 when it is gone.
@@ -167,6 +253,8 @@ func (e *Engine) blocksReceived(sl int, data []byte) bool {
 	case stored > 0:
 		if st != nil {
 			st.probed, st.strikes, st.keyAt = false, 0, 0
+			st.delivered += stored
+			st.faults, st.holdUntil = 0, 0
 		}
 	case err == nil:
 		// Nothing new. If a branch is being staged (it is not heavier yet) the
@@ -177,13 +265,20 @@ func (e *Engine) blocksReceived(sl int, data []byte) bool {
 		peerLast := codec.StrToInt64Def(e.peers.get(sl).LastBlock, -1)
 		if st != nil && !n.ForkProbe() && from != n.MyLastBlock() && from < peerLast {
 			st.keyAt = 0
-		} else if peerTip != "" {
-			e.markRejected(peerTip + "|" + n.MyLastBlockHash())
+		} else {
+			if peerTip != "" {
+				e.markRejected(e.rejectKey(sl, peerTip, n.MyLastBlockHash()))
+			}
+			if st != nil && st.askedAhead {
+				st.fault(e.now()) // it claimed to be ahead and gave us nothing
+			}
 		}
 	case errors.Is(err, node.ErrForkParent):
 		// the peer is on another branch: ask once more from before our tip
 		if st != nil && !st.probed {
 			st.probed, st.keyAt = true, 0
+		} else if st != nil {
+			st.fault(e.now()) // blocks that still do not continue our chain
 		}
 	}
 	e.syncMu.Unlock()
@@ -195,7 +290,7 @@ func (e *Engine) blocksReceived(sl int, data []byte) bool {
 		return true
 	}
 	e.logf("events", "blocks refused: "+err.Error())
-	if softBlockError(err) || st == nil {
+	if st == nil {
 		return true
 	}
 	e.syncMu.Lock()
@@ -214,13 +309,6 @@ func (e *Engine) markRejected(k string) {
 		e.rejected = map[string]bool{}
 	}
 	e.rejected[k] = true
-}
-
-// softBlockError recognises a refusal that comes from the chain position, not
-// from the peer: a branch forking below the finality horizon.
-func softBlockError(err error) bool {
-	m := err.Error()
-	return strings.Contains(m, "below the finality horizon") || strings.Contains(m, "no undo data")
 }
 
 // zipBlocksFrom archives the blocks first, first+1, ... (at most 101 and at

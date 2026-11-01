@@ -1,6 +1,7 @@
 package network
 
 import (
+	"net"
 	"sync"
 	"sync/atomic"
 
@@ -56,6 +57,28 @@ type peerTable struct {
 
 // MaxConnections mirrors MaxConecciones.
 const MaxConnections = 99
+
+// Inbound limits (final review F-11). outboundReserve slots can only be taken
+// by connections the node dials itself; of the rest, one IPv4 /24 or IPv6 /64
+// may hold maxInboundPerNet. Loopback peers (several nodes on one machine) are
+// not grouped.
+const (
+	outboundReserve  = 16
+	maxInboundPerNet = 3
+)
+
+// netGroup names the network an address belongs to for the inbound limit:
+// its /24 or /64. Loopback and unparsable addresses have none.
+func netGroup(ip string) string {
+	a := net.ParseIP(ip)
+	if a == nil || a.IsLoopback() {
+		return ""
+	}
+	if v4 := a.To4(); v4 != nil {
+		return v4.Mask(net.CIDRMask(24, 32)).String()
+	}
+	return a.Mask(net.CIDRMask(64, 128)).String()
+}
 
 func (t *peerTable) get(i int) Peer {
 	t.mu.Lock()
@@ -133,6 +156,23 @@ func (e *Engine) saveConnectionPort(tipo, ip string, port int, conn *Conn, to in
 	for i := 1; i <= MaxConnections; i++ {
 		if s := e.peers.slots[i]; s != nil && s.p.Tipo != "" && s.p.IP == p.IP && tipo == "CLI" &&
 			(!isLoopback(p.IP) || (port > 0 && s.p.ListeningPort == port)) {
+			return 0
+		}
+	}
+	if tipo == "CLI" {
+		// FIX(F-11): inbound peers never take the slots the node needs to dial
+		// its own seeds, and one network gets only a few of them.
+		inbound, sameNet := 0, 0
+		g := netGroup(p.IP)
+		for i := 1; i <= MaxConnections; i++ {
+			if s := e.peers.slots[i]; s != nil && s.p.Tipo == "CLI" {
+				inbound++
+				if g != "" && netGroup(s.p.IP) == g {
+					sameNet++
+				}
+			}
+		}
+		if inbound >= MaxConnections-outboundReserve || (g != "" && sameNet >= maxInboundPerNet) {
 			return 0
 		}
 	}

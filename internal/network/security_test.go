@@ -21,6 +21,7 @@ func connected(t *testing.T) (a, b *Engine, na, nb *node.Node, clkA *clock) {
 	na, nb = mkNode(t, &ca), mkNode(t, &cb)
 	a, b = NewEngine(na), NewEngine(nb)
 	a.MinPeers, b.MinPeers = 1, 1
+	a.BindAddr = "127.0.0.1"
 	if err := a.StartServer(0); err != nil {
 		t.Fatal(err)
 	}
