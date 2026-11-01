@@ -1,6 +1,7 @@
 package network
 
 import (
+	"io"
 	"net"
 	"testing"
 	"time"
@@ -84,5 +85,35 @@ func TestStreamLimits(t *testing.T) {
 	go func() { _, _ = a3.Write([]byte{0xff, 0xff, 0xff, 0xff}) }() // negative length
 	if _, err := NewConn(b3).ReadStream(time.Second, 1<<20); err != ErrTooLong {
 		t.Fatal("negative length accepted")
+	}
+}
+
+// F-19: a receiver that takes nothing frees the send slot after the stall
+// limit instead of holding it for the whole transfer; one that reads is served.
+func TestWriteStreamGivesUpOnAReaderThatTakesNothing(t *testing.T) {
+	oldStall, oldTotal := streamStall, streamTotal
+	streamStall, streamTotal = 100*time.Millisecond, 2*time.Second
+	defer func() { streamStall, streamTotal = oldStall, oldTotal }()
+
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	done := make(chan error, 1)
+	go func() { done <- NewConn(a).WriteStream("FILE", make([]byte, 1<<20)) }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a transfer to a peer that reads nothing succeeded")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the slot is still held by a peer that reads nothing")
+	}
+
+	c, d := net.Pipe()
+	defer c.Close()
+	defer d.Close()
+	go func() { _, _ = io.Copy(io.Discard, d) }()
+	if err := NewConn(c).WriteStream("FILE", make([]byte, 1<<20)); err != nil {
+		t.Fatalf("a reading peer was cut off: %v", err)
 	}
 }

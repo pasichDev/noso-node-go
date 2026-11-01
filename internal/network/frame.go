@@ -67,18 +67,60 @@ func (c *Conn) WriteLine(s string) error {
 	return err
 }
 
+// Limits of a file transfer. FIX(F-19): the write used to have one deadline for
+// the whole file, so a peer that read nothing (or a trickle) held one of the
+// few send slots for its full length, and eight such peers held all of them.
+// Now every chunk must be taken within streamStall, the transfer as a whole
+// within streamTotal, and after streamGrace the peer must keep up with
+// streamMinRate bytes per second on average. They are variables so tests can
+// shorten them.
+var (
+	streamChunk   = 32 << 10
+	streamStall   = 10 * time.Second
+	streamTotal   = 120 * time.Second
+	streamGrace   = 5 * time.Second
+	streamMinRate = int64(16 << 10)
+)
+
+// errSlowReader ends a transfer whose receiver does not keep up.
+var errSlowReader = errors.New("peer reads too slowly")
+
 // WriteStream sends label as a line and then the file framing, as one
 // serialised unit.
 func (c *Conn) WriteStream(label string, data []byte) error {
 	c.wm <- struct{}{}
 	defer func() { <-c.wm }()
-	_ = c.c.SetWriteDeadline(time.Now().Add(120 * time.Second))
 	var hdr [4]byte
 	binary.BigEndian.PutUint32(hdr[:], uint32(len(data)))
-	buf := append([]byte(label+"\r\n"), hdr[:]...)
-	buf = append(buf, data...)
-	_, err := c.c.Write(buf)
-	return err
+	start := time.Now()
+	var written int64
+	put := func(p []byte) error {
+		for len(p) > 0 {
+			chunk := p
+			if len(chunk) > streamChunk {
+				chunk = chunk[:streamChunk]
+			}
+			el := time.Since(start)
+			if el > streamTotal {
+				return errSlowReader
+			}
+			_ = c.c.SetWriteDeadline(time.Now().Add(streamStall))
+			n, err := c.c.Write(chunk)
+			written += int64(n)
+			if err != nil {
+				return err
+			}
+			p = p[len(chunk):]
+			if el = time.Since(start); el > streamGrace && written < int64(el.Seconds())*streamMinRate {
+				return errSlowReader
+			}
+		}
+		return nil
+	}
+	if err := put(append([]byte(label+"\r\n"), hdr[:]...)); err != nil {
+		return err
+	}
+	return put(data)
 }
 
 // ReadLine reads one line with the given timeout (0 = no deadline). Bytes

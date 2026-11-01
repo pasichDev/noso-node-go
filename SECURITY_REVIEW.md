@@ -102,7 +102,9 @@ Status of the final audit's findings and of the consensus, operator and complete
 | F-11 | 99 inbound peers fill every slot | Fixed: slots reserved for outbound, inbound limited per network. `TestInboundCannotFillEverySlot`, `TestInboundLimitedPerNetwork` |
 | F-18 | Same chain id on every network | Changed: the chain id of the network file is signed into every order and its transfer id. `TestOrderSignedOnAnotherNetworkIsRefused`, `TestBlocksCommitToTheNetworkFile`, `TestParseNetworkConfigIsStrict`, `TestInitNetworkWritesNetworkFile` (written, not run). |
 | F-17 | `newfromkeys` private key in argv | Fixed: `nosocli newfromkeys <pub> <file>` or `-` for stdin; a key as a word is refused. `TestNewFromKeysTakesTheKeyFromAFileOrStdin` (written, not run) |
-| F-9, F-12..F-16, F-19, F-20 | See the final audit | Open |
+| F-19 | Send slots held by slow readers | Not reproduced by a run (no test was run in this round); from the code the claim holds: `WriteStream` had one 120 s deadline for the whole file. Changed: every chunk must be taken within 10 s, the transfer within 120 s, and after 5 s the peer must keep 16 KiB/s on average. `TestWriteStreamGivesUpOnAReaderThatTakesNothing` (written, not run) |
+| F-20 | Report signatures before the stake check | Changed: the shape, block and stake are judged first, signatures last (`ParseMNShape`, `MNode.SigOK`). `TestReportShapeIsSeparateFromItsSignature` (written, not run); the order of the checks is not covered by a test |
+| F-9, F-12..F-16 | See the final audit | Open |
 | consensus 2 | Crash while genesis is written forks the node | Fixed: `TestFinal_CrashDuringGenesisEveryPoint`, `TestFinal_DoubleCrashDuringGenesis` |
 | consensus 3 | Forks between probe windows never found | Fixed: `TestFinal_DeepForksResolve` (depth 170 and 330) |
 | consensus 4 | Out-of-turn proposer takes a slot | Fixed: `OutOfTurnGrace`. `TestFinal_OutOfTurnBlockWaitsForTheGracePeriod` |
