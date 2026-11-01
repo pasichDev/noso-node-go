@@ -1,6 +1,7 @@
 package rpc
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -64,13 +65,27 @@ func (s *Server) Start(port int) error {
 	return nil
 }
 
-// Stop closes the listener (SetRPCOff).
+// stopGrace is how long Stop waits for requests that are being served.
+var stopGrace = 10 * time.Second
+
+// Stop closes the listener (SetRPCOff) and waits for the requests in flight.
+// FIX(F-15): Close did not wait for handlers, so a request such as
+// getnewaddress could go on writing the wallet after Stop returned, while the
+// node was closing or restarting and another process could already hold the
+// data directory. A handler that is stuck is cut off after stopGrace; a handler
+// that itself stops the server cannot wait for itself, so it is cut off too.
 func (s *Server) Stop() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.srv != nil {
-		_ = s.srv.Close()
-		s.srv, s.ln = nil, nil
+	srv := s.srv
+	s.srv, s.ln = nil, nil
+	s.mu.Unlock()
+	if srv == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), stopGrace)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		_ = srv.Close()
 	}
 }
 

@@ -24,3 +24,19 @@ func checkOwner(dir string) error {
 	}
 	return nil
 }
+
+// checkOwned refuses a socket directory that is a link, not a directory, or
+// not ours. It does not look at the mode: that is tightened afterwards.
+func checkOwned(dir string) error {
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
+		return fmt.Errorf("control: %s is not a plain directory", dir)
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
+		return fmt.Errorf("control: %s belongs to another user", dir)
+	}
+	return nil
+}

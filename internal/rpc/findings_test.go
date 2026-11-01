@@ -1,9 +1,13 @@
 package rpc
 
 import (
+	"net"
+	"net/http"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/pasichDev/noso-node-go/internal/node"
 )
@@ -71,5 +75,36 @@ func TestL7_IPv6Whitelist(t *testing.T) {
 	}
 	if !ValidRPCHost("127.0.0.1,::1", "[::1]:5000") || !ValidRPCHost("127.0.0.1,localhost", "127.0.0.1:80") {
 		t.Fatal("whitelisted caller refused")
+	}
+}
+
+// F-15: Stop waits for the requests in flight, so none goes on after it returns.
+func TestStopWaitsForRequestsInFlight(t *testing.T) {
+	s := newServer(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var finished atomic.Bool
+	started := make(chan struct{})
+	s.mu.Lock()
+	s.ln = ln
+	s.srv = &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		time.Sleep(300 * time.Millisecond)
+		finished.Store(true)
+	})}
+	go func() { _ = s.srv.Serve(ln) }()
+	s.mu.Unlock()
+	go func() {
+		resp, err := http.Get("http://" + ln.Addr().String() + "/")
+		if err == nil {
+			resp.Body.Close()
+		}
+	}()
+	<-started
+	s.Stop()
+	if !finished.Load() {
+		t.Fatal("Stop returned while a request was still being served")
 	}
 }

@@ -65,6 +65,9 @@ func main() {
 	}
 }
 
+// carriedLock is the data directory lock a restart hands to the next run.
+var carriedLock *storage.DirLock
+
 // run opens the node, serves until a signal or a stop request, closes
 // everything and reports whether a restart was asked for.
 func run(opt options, sig <-chan os.Signal) (restart bool) {
@@ -83,11 +86,24 @@ func run(opt options, sig <-chan os.Signal) (restart bool) {
 	}
 	// FIX(C3): one process owns a data directory. The lock is kept for the whole
 	// run (and released before a restart reopens the directory).
-	lock, err := storage.LockDataDir(*data)
-	if err != nil {
-		log.Fatalf("cannot open data directory: %v", err)
+	// FIX(F-15): a restart keeps the lock it holds instead of releasing and
+	// taking it again, so no other process (nosocli, the GUI) can open the
+	// directory in the gap, and nothing here runs without it.
+	lock := carriedLock
+	carriedLock = nil
+	if lock == nil {
+		var err error
+		if lock, err = storage.LockDataDir(*data); err != nil {
+			log.Fatalf("cannot open data directory: %v", err)
+		}
 	}
-	defer lock.Close()
+	defer func() {
+		if restart {
+			carriedLock = lock
+		} else {
+			_ = lock.Close()
+		}
+	}()
 	cfg := node.Config{WalletPassphrase: pass, InsecurePlainWallet: *plainWallet}
 	if *seedURL != "" {
 		cfg.FetchSeeds = func() string {

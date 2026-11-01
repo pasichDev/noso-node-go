@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/pasichDev/noso-node-go/internal/control"
+	"github.com/pasichDev/noso-node-go/internal/storage"
 )
 
 // `restart` really restarts: the daemon closes the node and opens the data
@@ -152,4 +153,35 @@ func TestControlSocketKeepsKeysBehindThePassphrase(t *testing.T) {
 	}
 	sig <- os.Interrupt
 	<-done
+}
+
+// F-15: a restart keeps the data directory lock. A run that is handed the lock
+// does not take it again (it would fail: the directory is locked), and it
+// releases it when it ends without a restart.
+func TestRunUsesTheLockItIsHandedAndReleasesIt(t *testing.T) {
+	t.Setenv("NOSO_WALLET_PASSPHRASE", "correct horse battery")
+	dir := filepath.Join(t.TempDir(), "NOSODATA")
+	l, err := storage.LockDataDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	carriedLock = l
+	sig := make(chan os.Signal, 1)
+	done := make(chan bool, 1)
+	go func() { done <- run(options{data: dir, noP2P: true, noNTP: true}, sig) }()
+	time.Sleep(500 * time.Millisecond)
+	if _, err := storage.LockDataDir(dir); err == nil {
+		t.Fatal("the directory was not locked while the node ran")
+	}
+	sig <- os.Interrupt
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("daemon did not stop")
+	}
+	l2, err := storage.LockDataDir(dir)
+	if err != nil {
+		t.Fatalf("the lock was not released: %v", err)
+	}
+	l2.Close()
 }
