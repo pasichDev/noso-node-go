@@ -72,7 +72,7 @@ func (p *proc) start(t *testing.T, bin string) {
 		t.Fatal(err)
 	}
 	p.log = f
-	p.cmd = exec.Command(bin, "-data", p.dir, "-no-ntp")
+	p.cmd = exec.Command(bin, "-data", p.dir, "-no-ntp", "-bind", "127.0.0.1")
 	p.cmd.Env = append(os.Environ(), "NOSO_WALLET_PASSPHRASE=correct horse battery")
 	p.cmd.Stdout, p.cmd.Stderr = f, f
 	if err := p.cmd.Start(); err != nil {

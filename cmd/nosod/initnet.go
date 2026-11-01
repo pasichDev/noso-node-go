@@ -19,6 +19,57 @@ import (
 // faster than real time. It is written by `nosod init-network -clock-scale`.
 const devnetFile = "devnet.txt"
 
+// bindFile holds the address the P2P listener of a data directory binds to.
+// `nosod init-network` writes it (the -host/-bind value, loopback by default);
+// `nosod -bind` overrides it; without either the node listens on every
+// interface, as a public node must.
+const bindFile = "bind.txt"
+
+// readBind returns the bind address stored in a data directory, "" if none.
+func readBind(dataDir string) string {
+	raw, err := os.ReadFile(filepath.Join(dataDir, bindFile))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(raw))
+}
+
+// planPorts returns the peer and RPC port of every node. A rpcBase of 0 puts
+// the RPC ports right after the peer ports (base..base+n-1, then base+n..); a
+// negative one means no RPC. It refuses ports out of range and any port used
+// twice, so no two nodes of one machine can ever fight over one.
+func planPorts(nodes, base, rpcBase int) (peer, rpc []int, err error) {
+	if rpcBase == 0 {
+		rpcBase = base + nodes
+	}
+	used := map[int]string{}
+	claim := func(port int, what string) error {
+		if port < 1 || port > 65535 {
+			return fmt.Errorf("%s port %d is out of range 1..65535", what, port)
+		}
+		if prev, dup := used[port]; dup {
+			return fmt.Errorf("%s port %d is already used by %s; choose -base-port and -rpc-base-port ranges that do not overlap", what, port, prev)
+		}
+		used[port] = what
+		return nil
+	}
+	for i := 0; i < nodes; i++ {
+		p := base + i
+		if err := claim(p, fmt.Sprintf("node%d peer", i+1)); err != nil {
+			return nil, nil, err
+		}
+		peer = append(peer, p)
+	}
+	for i := 0; i < nodes && rpcBase > 0; i++ {
+		p := rpcBase + i
+		if err := claim(p, fmt.Sprintf("node%d RPC", i+1)); err != nil {
+			return nil, nil, err
+		}
+		rpc = append(rpc, p)
+	}
+	return peer, rpc, nil
+}
+
 // devClock is the chain clock of a test network: base + (wall - anchor) *
 // scale. It is a pure function of the wall clock, so every node of the
 // network, started at any time and restarted at will, shows the same time.
@@ -53,15 +104,20 @@ func (c devClock) now() int64 {
 }
 
 const initUsage = `usage:
-  nosod init-network -dir DIR [-nodes 4] [-proposers 3] [-host 127.0.0.1] [-base-port 18080]
-                     [-rpc-base-port 18078] [-clock-scale N]
+  nosod init-network -dir DIR [-nodes 4] [-proposers 3] [-host 127.0.0.1] [-bind ADDR]
+                     [-base-port 18080] [-rpc-base-port N] [-clock-scale N]
       Creates a new network on this machine: DIR/node1 ... DIR/nodeN, each with
       its own wallet, the same proposers file (the first -proposers nodes),
-      a seed list of the other nodes, and ports base-port+i / rpc-base-port+i.
+      the same seed list (all nodes) and ports base-port+i / rpc-base-port+i.
+      -host is the address the nodes tell each other (seeds, masternode IP);
+      the P2P listener binds -bind, which defaults to -host, so the default
+      network never leaves loopback. The RPC server always binds loopback.
+      The default RPC ports follow the peer ports (base-port+nodes+i); ports
+      that overlap or are out of range are refused.
       Works for any number of nodes from 1. Prints the public keys, never a
       private key. -clock-scale N runs the chain clock N times faster than real
       time (test networks only, see docs/running-a-node.md).
-  nosod init-network -data DATADIR -proposer-keys FILE [-seed host:port]... [-propose]
+  nosod init-network -data DATADIR -proposer-keys FILE [-seed host:port]... [-propose] [-bind ADDR]
       Prepares one data directory to join (or serve) a network made elsewhere:
       imports the public keys of the proposers (one per line) and the seeds.
 
@@ -80,9 +136,10 @@ func initNetwork(args []string, stdout, stderr *os.File) int {
 	dir := fs.String("dir", "", "directory that receives node1..nodeN")
 	nodes := fs.Int("nodes", 4, "number of nodes")
 	props := fs.Int("proposers", 3, "how many of the nodes propose blocks")
-	host := fs.String("host", "127.0.0.1", "address the nodes listen on and tell each other")
+	host := fs.String("host", "127.0.0.1", "address the nodes tell each other (seeds, masternode IP)")
+	bind := fs.String("bind", "", "address the P2P listeners bind (default: the -host value)")
 	basePort := fs.Int("base-port", 18080, "peer port of node1; node i uses base+i-1")
-	rpcBase := fs.Int("rpc-base-port", 18078, "RPC port of node1; node i uses base+i-1 (negative: no RPC)")
+	rpcBase := fs.Int("rpc-base-port", 0, "RPC port of node1; node i uses base+i-1 (default: base-port+nodes; negative: no RPC)")
 	scale := fs.Int64("clock-scale", 1, "chain clock speed-up (test networks only)")
 	passFile := fs.String("wallet-pass-file", "", "file holding the wallet passphrase")
 	data := fs.String("data", "", "single data directory to configure")
@@ -100,11 +157,20 @@ func initNetwork(args []string, stdout, stderr *os.File) int {
 		return 2
 	}
 	if *data != "" {
-		return joinNetwork(*data, pass, *keysFile, seeds, *propose, stdout, stderr)
+		return joinNetwork(*data, pass, *keysFile, seeds, *propose, *bind, stdout, stderr)
 	}
 	if *dir == "" || *nodes < 1 || *props < 1 || *props > *nodes || *scale < 1 {
 		fmt.Fprintln(stderr, initUsage)
 		return 2
+	}
+	peerPorts, rpcPorts, err := planPorts(*nodes, *basePort, *rpcBase)
+	if err != nil {
+		fmt.Fprintln(stderr, "init-network:", err)
+		return 2
+	}
+	bindAddr := *bind
+	if bindAddr == "" {
+		bindAddr = *host
 	}
 	// Open all wallets first: the proposers file needs every key.
 	var ns []*node.Node
@@ -145,11 +211,14 @@ func initNetwork(args []string, stdout, stderr *os.File) int {
 	}
 	anchor := time.Now().Unix()
 	for i, n := range ns {
+		// FIX: the same list on every node, the node itself included. The
+		// status hash the nodes vote on contains a hash of the configuration,
+		// so lists that differ (each without its own node) never agree and no
+		// consensus can form: getmainnetinfo fails and no masternode is listed.
+		// A node never dials itself.
 		var sl []string
 		for j := range ns {
-			if j != i {
-				sl = append(sl, fmt.Sprintf("%s;%d:", *host, *basePort+j))
-			}
+			sl = append(sl, fmt.Sprintf("%s;%d:", *host, peerPorts[j]))
 		}
 		writeSeeds(n, strings.Join(sl, ""))
 		if err := n.SetProposers(keys); err != nil {
@@ -160,15 +229,19 @@ func initNetwork(args []string, stdout, stderr *os.File) int {
 			o.AutoServer = true
 			o.BuildBlocks = i < *props
 			o.MNIP = *host
-			o.MNPort = strconv.Itoa(*basePort + i)
+			o.MNPort = strconv.Itoa(peerPorts[i])
 			o.MNSign = n.Wallet.At(0).Hash
-			if *rpcBase >= 0 {
+			if len(rpcPorts) > 0 {
 				o.RPCAuto = true
-				o.RPCPort = *rpcBase + i
+				o.RPCPort = rpcPorts[i]
 			}
 		})
 		n.EnsureRPCTokens()
 		if err := n.SaveOptions(); err != nil {
+			fmt.Fprintln(stderr, "init-network:", err)
+			return 1
+		}
+		if err := os.WriteFile(filepath.Join(n.Lay.Root, bindFile), []byte(bindAddr+"\n"), 0o600); err != nil {
 			fmt.Fprintln(stderr, "init-network:", err)
 			return 1
 		}
@@ -205,7 +278,7 @@ func writeSeeds(n *node.Node, seeds string) {
 }
 
 // joinNetwork configures one data directory for an existing network.
-func joinNetwork(data string, pass []byte, keysFile string, seeds []string, propose bool, stdout, stderr *os.File) int {
+func joinNetwork(data string, pass []byte, keysFile string, seeds []string, propose bool, bind string, stdout, stderr *os.File) int {
 	if keysFile == "" {
 		fmt.Fprintln(stderr, "init-network: -proposer-keys is required with -data")
 		return 2
@@ -217,8 +290,10 @@ func joinNetwork(data string, pass []byte, keysFile string, seeds []string, prop
 	}
 	var keys []string
 	for _, l := range strings.Split(string(raw), "\n") {
-		if l = strings.TrimSpace(l); l != "" && !strings.HasPrefix(l, "#") {
-			keys = append(keys, l)
+		// `nosocli pubkey` prints "ADDRESS KEY": the key is the last field, so
+		// its output can be used as it is, one line per proposer
+		if f := strings.Fields(l); len(f) > 0 && !strings.HasPrefix(f[0], "#") {
+			keys = append(keys, f[len(f)-1])
 		}
 	}
 	if err := cli.CheckNewPassphrase(data, pass); err != nil {
@@ -264,6 +339,12 @@ func joinNetwork(data string, pass []byte, keysFile string, seeds []string, prop
 	if err := n.SaveOptions(); err != nil {
 		fmt.Fprintln(stderr, "init-network:", err)
 		return 1
+	}
+	if bind != "" {
+		if err := os.WriteFile(filepath.Join(data, bindFile), []byte(bind+"\n"), 0o600); err != nil {
+			fmt.Fprintln(stderr, "init-network:", err)
+			return 1
+		}
 	}
 	fmt.Fprintf(stdout, "%s: %d proposers, %d seeds, builds blocks: %v\nthis node's public key: %s\n",
 		data, len(keys), len(seeds), propose, mine)

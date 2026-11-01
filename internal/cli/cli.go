@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"crypto/subtle"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/pasichDev/noso-node-go/internal/codec"
+	"github.com/pasichDev/noso-node-go/internal/control"
 	"github.com/pasichDev/noso-node-go/internal/network"
 	"github.com/pasichDev/noso-node-go/internal/node"
 	"github.com/pasichDev/noso-node-go/internal/rpc"
@@ -33,8 +35,9 @@ type Dispatcher struct {
 	// CanRestart is true when Quit(true) really reopens the node (nosod).
 	CanRestart bool
 	// RPCPort/RPCSetter let the daemon change the port in use.
-	mu  sync.Mutex
-	out func(string)
+	mu     sync.Mutex
+	out    func(string)
+	failed bool
 }
 
 // New returns a dispatcher.
@@ -62,6 +65,24 @@ func (d *Dispatcher) RunTo(line string, f func(string)) {
 	d.out = nil
 }
 
+// RunStatus is RunTo that also reports whether the command succeeded: false
+// for an unknown command, a refused order, an invalid argument or any other
+// failure the command printed (nosocli turns it into its exit code).
+func (d *Dispatcher) RunStatus(line string, f func(string)) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.out, d.failed = f, false
+	d.exec(line)
+	d.out = nil
+	return !d.failed
+}
+
+// fail prints an error message and marks the command as failed.
+func (d *Dispatcher) fail(format string, a ...any) {
+	d.failed = true
+	d.log(format, a...)
+}
+
 func (d *Dispatcher) log(format string, a ...any) {
 	s := format
 	if len(a) > 0 {
@@ -76,7 +97,7 @@ func (d *Dispatcher) printer() network.Printer { return func(s string) { d.log("
 
 func (d *Dispatcher) needNet() bool {
 	if d.E == nil {
-		d.log("This command needs a running node (nosod); offline mode only serves local data.")
+		d.fail("This command needs a running node (nosod); offline mode only serves local data.")
 		return false
 	}
 	return true
@@ -115,7 +136,7 @@ func (d *Dispatcher) exec(line string) {
 		h(d, line)
 		return
 	}
-	d.log("Unknown command: %s", cmd)
+	d.fail("Unknown command: %s", cmd)
 }
 
 // Sensitive reports whether a command carries or prints key material. Such
@@ -127,6 +148,32 @@ func Sensitive(line string) bool {
 		return true
 	}
 	return false
+}
+
+// NeedsProof reports whether a command prints or signs with private keys. Sent
+// over the control socket it needs the wallet passphrase as proof: the socket
+// is open to every process of the same user, and the passphrase of a GUI
+// session is held nowhere else (final review F-6).
+func NeedsProof(line string) bool {
+	switch codec.ASCIIUpper(codec.Parameter(line, 0)) {
+	case "SHOWKEYS", "EXPKEYS", "EXPWALLET", "EXPORTADDRESS", "SIGNCFG", "DIRECTIVE":
+		return true
+	}
+	return false
+}
+
+// ControlRunner is the runner for the control socket of a daemon that was
+// opened with the wallet passphrase pass: commands that need proof run only
+// when the client sent that passphrase.
+func (d *Dispatcher) ControlRunner(pass []byte) control.Runner {
+	return func(line string, proof []byte, out func(string)) bool {
+		if NeedsProof(line) && (len(pass) == 0 || subtle.ConstantTimeCompare(proof, pass) != 1) {
+			out("This command prints or signs with private keys. Over the control socket it needs the wallet passphrase: " +
+				"give nosocli NOSO_WALLET_PASSPHRASE or -wallet-pass-file, or stop the node and run it offline.")
+			return false
+		}
+		return d.RunStatus(line, out)
+	}
 }
 
 // MinPassphrase is the shortest wallet passphrase accepted when an

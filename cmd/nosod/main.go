@@ -16,6 +16,7 @@ import (
 
 	"github.com/pasichDev/noso-node-go/internal/cli"
 	"github.com/pasichDev/noso-node-go/internal/codec"
+	"github.com/pasichDev/noso-node-go/internal/consensus"
 	"github.com/pasichDev/noso-node-go/internal/control"
 	"github.com/pasichDev/noso-node-go/internal/logx"
 	"github.com/pasichDev/noso-node-go/internal/network"
@@ -32,6 +33,7 @@ type options struct {
 	plainWallet bool
 	noP2P       bool
 	noNTP       bool
+	bind        string
 }
 
 func main() {
@@ -45,6 +47,7 @@ func main() {
 	flag.BoolVar(&o.plainWallet, "insecure-plain-wallet", false, "keep private keys unencrypted in wallet.pkw (not recommended)")
 	flag.BoolVar(&o.noP2P, "no-p2p", false, "open the data directory and the RPC server but do not connect to peers")
 	flag.BoolVar(&o.noNTP, "no-ntp", false, "do not query NTP servers at start")
+	flag.StringVar(&o.bind, "bind", "", "address the peer listener binds (e.g. 127.0.0.1 to stay on this machine); default: bind.txt of the data directory, else every interface")
 	version := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
 	if *version {
@@ -70,6 +73,10 @@ func run(opt options, sig <-chan os.Signal) (restart bool) {
 	pass, err := walletPassphrase(*passFile)
 	if err != nil {
 		log.Fatalf("wallet passphrase: %v", err)
+	}
+	if len(pass) == 0 && !*plainWallet {
+		// before anything is written: a refusal must not leave a half-made data directory
+		log.Fatalf("wallet passphrase: a passphrase is required (NOSO_WALLET_PASSPHRASE or -wallet-pass-file)")
 	}
 	if err := cli.CheckNewPassphrase(*data, pass); err != nil { // finding 20
 		log.Fatalf("wallet passphrase: %v", err)
@@ -108,6 +115,10 @@ func run(opt options, sig <-chan os.Signal) (restart bool) {
 	n.Log = logf
 	e := network.NewEngine(n)
 	e.Log = logf
+	e.BindAddr = opt.bind
+	if e.BindAddr == "" {
+		e.BindAddr = readBind(*data)
+	}
 	if isDev { // connection timers stay in real seconds, only the chain clock is fast
 		e.Wall = func() int64 { return time.Now().Unix() }
 		logf("console", fmt.Sprintf("TEST NETWORK: chain clock runs %dx faster than real time", dev.scale))
@@ -148,7 +159,7 @@ func run(opt options, sig <-chan os.Signal) (restart bool) {
 		}
 	}
 	var wg sync.WaitGroup
-	ln, err := control.Serve(control.SocketPath(*data), func(line string, out func(string)) { d.RunTo(line, out) })
+	ln, err := control.Serve(control.SocketPath(*data), d.ControlRunner(pass))
 	if err != nil {
 		logf("console", "control socket unavailable: "+err.Error())
 	}
@@ -172,6 +183,30 @@ func run(opt options, sig <-chan os.Signal) (restart bool) {
 		}
 	}()
 
+	// PRestart N (advopt.txt): restart the node N block periods after it
+	// started, in the quiet middle of a block period (KeepConnect, original).
+	if o.PRestart > 0 {
+		at := n.UTCTime() + o.PRestart*consensus.SecondsPerBlock
+		logf("console", "PRestart set at "+time.Unix(at, 0).UTC().Format("2006-01-02 15:04:05"))
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			t := time.NewTicker(3 * time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-quit:
+					return
+				case <-t.C:
+					if prestartDue(at, n.UTCTime(), n.BlockAge()) {
+						ask(true)
+						return
+					}
+				}
+			}
+		}()
+	}
+
 	logf("console", "Noso "+node.MainnetVersion+node.NodeRelease+" ready, last block "+codec.IntToStr(n.MyLastBlock())+
 		", data in "+absPath(*data))
 	select {
@@ -189,6 +224,12 @@ func run(opt options, sig <-chan os.Signal) (restart bool) {
 	e.Stop()
 	_ = os.WriteFile(n.Lay.ClosedMarker, nil, 0o644)
 	return restart
+}
+
+// prestartDue reports whether the PRestart moment has come: the time is past
+// the set point and the block period is neither about to end nor just begun.
+func prestartDue(at, now, age int64) bool {
+	return at > 0 && now > at && age > 120 && age < 450
 }
 
 func absPath(p string) string {

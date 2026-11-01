@@ -473,10 +473,27 @@ func (s *Server) blockInfo(p string) string {
 	return res
 }
 
+// mainnetInfo answers getmainnetinfo from the consensus of the seeds. When
+// the seeds form no majority (a single node, a network that has not agreed
+// yet) there is no consensus to report and the node's own view is given, so
+// the call still answers instead of failing with 499 on empty fields.
 func (s *Server) mainnetInfo() string {
+	n := s.N
 	g := s.E.GetConsensus
-	return fmt.Sprintf("mainnetinfo\x7f%s\x7f%s\x7f%s\x7f%s\x7f%s\x7f%d", g(2), codec.Copy(g(10), 0, 5),
-		codec.Copy(g(15), 0, 5), codec.Copy(g(17), 0, 5), g(3), consensus.GetSupply(codec.StrToIntDef(g(2), 0)))
+	field := func(v string) string {
+		if v == "" {
+			return "null"
+		}
+		return v
+	}
+	if g(0) == "" {
+		return fmt.Sprintf("mainnetinfo\x7f%d\x7f%s\x7f%s\x7f%s\x7f%d\x7f%d", n.MyLastBlock(),
+			field(codec.Copy(n.MyLastBlockHash(), 0, 5)), field(codec.Copy(n.Headers.Hash(), 0, 5)),
+			field(codec.Copy(n.Summary.Hash(), 0, 5)), n.PendingCount(), consensus.GetSupply(n.MyLastBlock()))
+	}
+	return fmt.Sprintf("mainnetinfo\x7f%d\x7f%s\x7f%s\x7f%s\x7f%d\x7f%d", codec.StrToIntDef(g(2), 0),
+		field(codec.Copy(g(10), 0, 5)), field(codec.Copy(g(15), 0, 5)), field(codec.Copy(g(17), 0, 5)),
+		codec.StrToIntDef(g(3), 0), consensus.GetSupply(codec.StrToIntDef(g(2), 0)))
 }
 
 func (s *Server) blockOrders(p string) string {

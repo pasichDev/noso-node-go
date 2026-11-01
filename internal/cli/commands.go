@@ -64,7 +64,7 @@ func init() {
 				if d.E.ServerActive() {
 					d.log("Server Already active")
 				} else if err := d.E.StartServer(int(codec.StrToIntDef(d.N.Options().MNPort, 8080))); err != nil {
-					d.log("Unable to start Server")
+					d.fail("Unable to start Server")
 				}
 			}
 		},
@@ -157,7 +157,7 @@ func init() {
 		},
 		"SAVEADV": func(d *Dispatcher, l string) {
 			if err := d.N.SaveOptions(); err != nil {
-				d.log("Error creating/saving AdvOpt file: %v", err)
+				d.fail("Error creating/saving AdvOpt file: %v", err)
 			}
 		},
 		"OFFSET": func(d *Dispatcher, l string) {
@@ -181,7 +181,7 @@ func init() {
 		// wallet
 		"NEWADDRESS": func(d *Dispatcher, l string) {
 			if _, err := newWalletAddress(d); err != nil {
-				d.log("Wallet not saved: %v", err)
+				d.fail("Wallet not saved: %v", err)
 				return
 			}
 			d.log("1 new addresses")
@@ -192,32 +192,28 @@ func init() {
 		"EXPWALLET":  cmdExpWallet,
 		"SETDEFAULT": func(d *Dispatcher, l string) { setDefault(d, l) },
 		"CUSTOMIZE": func(d *Dispatcher, l string) {
-			if d.needNet() {
-				d.E.Customize(l, d.printer())
+			if d.needNet() && !d.E.Customize(l, d.printer()) {
+				d.failed = true
 			}
 		},
-		"SENDTO": func(d *Dispatcher, l string) {
-			if d.needNet() {
-				d.E.SendFunds(l, d.printer(), 0)
-			}
-		},
+		"SENDTO": cmdSendTo,
 		"SENDGVT": func(d *Dispatcher, l string) {
-			if d.needNet() {
-				d.E.SendGVT(l, d.printer())
+			if d.needNet() && d.E.SendGVT(l, d.printer()) == "" {
+				d.failed = true
 			}
 		},
 		"GETCERT": func(d *Dispatcher, l string) {
 			addr := p(l, 1)
 			i := d.N.Wallet.IndexOf(addr)
 			if i < 0 || addr == "" {
-				d.log("Invalid address")
+				d.fail("Invalid address")
 				return
 			}
 			// FIX(L-05): getcert <address> <audience> <nonce>
 			w := d.N.Wallet.At(i)
 			cert := crypto.GetCertificate(w.PublicKey, w.PrivateKey, p(l, 2), p(l, 3), d.N.UTCTimeStr())
 			if p(l, 2) == "" || p(l, 3) == "" || cert == "" {
-				d.log("Syntax: getcert {address} {audience} {nonce}")
+				d.fail("Syntax: getcert {address} {audience} {nonce}")
 				return
 			}
 			d.log("%s owner cert: \n%s", addr, cert)
@@ -225,7 +221,7 @@ func init() {
 		"CHECKCERT": func(d *Dispatcher, l string) {
 			addr, ts := crypto.CheckCertificate(p(l, 1), p(l, 2), p(l, 3))
 			if addr == "" {
-				d.log("Invalid verification")
+				d.fail("Invalid verification")
 				return
 			}
 			if al := d.N.Summary.Alias(addr); al != "" {
@@ -246,18 +242,18 @@ func init() {
 		"EXPORTADDRESS": func(d *Dispatcher, l string) {
 			i := d.N.Wallet.IndexOf(p(l, 1))
 			if i < 0 {
-				d.log("Address not found in wallet")
+				d.fail("Address not found in wallet")
 				return
 			}
 			// created exclusively with mode 0600; it holds a private key
 			f, err := os.OpenFile("tempwallet.pkw", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 			if err != nil {
-				d.log("Can not create tempwallet.pkw (does it exist already?)")
+				d.fail("Can not create tempwallet.pkw (does it exist already?)")
 				return
 			}
 			_, werr := f.Write(d.N.Wallet.At(i).Encode())
 			if f.Close() != nil || werr != nil {
-				d.log("Failed")
+				d.fail("Failed")
 				return
 			}
 			d.log("Address exported to tempwallet.pkw")
@@ -268,7 +264,7 @@ func init() {
 			w.PublicKey, w.PrivateKey = p(l, 1), p(l, 2)
 			w.Hash = crypto.GetAddressFromPublicKey(w.PublicKey, 0)
 			if _, err := d.N.Wallet.Add(w); err != nil {
-				d.log("Wallet not saved: %v", err)
+				d.fail("Wallet not saved: %v", err)
 			}
 		},
 		"GETMULTI": cmdGetMulti,
@@ -296,7 +292,7 @@ func init() {
 		"BLOCK": func(d *Dispatcher, l string) {
 			b := codec.StrToIntDef(p(l, 1), -1)
 			if b < 0 || b > d.N.MyLastBlock() {
-				d.log("Invalid block number")
+				d.fail("Invalid block number")
 				return
 			}
 			showBlockInfo(d, b)
@@ -320,7 +316,7 @@ func init() {
 			}
 			g := d.E.OrderDetails(p(l, 1))
 			if g.AmmountTrf <= 0 {
-				d.log("Order not found")
+				d.fail("Order not found")
 				return
 			}
 			d.log("Time     : %s", timestampToDate(g.TimeStamp))
@@ -349,7 +345,7 @@ func init() {
 				d.log("%s", o.Receiver)
 				d.log("%d", o.AmmountTrf)
 			} else {
-				d.log("Order not found")
+				d.fail("Order not found")
 			}
 		},
 		"ADDRESS":     cmdAddress,
@@ -376,8 +372,12 @@ func init() {
 		"FREEZED":      cmdFreezed,
 		"SUMINDEXSIZE": func(d *Dispatcher, l string) { d.log("%d", d.N.Summary.Len()) },
 		"MNSCHECKS": func(d *Dispatcher, l string) {
-			for _, c := range d.N.Checks() {
+			cs := d.N.Checks()
+			for _, c := range cs {
 				d.log("%s,%d", c.ValidatorIP, node.ValidNodesInCheck(c.ValidNodes))
+			}
+			if len(cs) == 0 {
+				d.log("No masternode checks in this block yet.")
 			}
 		},
 		"CONSENSUS": cmdConsensus,
@@ -415,7 +415,7 @@ func init() {
 		"DELPOOL":    func(d *Dispatcher, l string) { cfgErr(d, d.N.CFG.Remove(p(l, 1), 3)) },
 		"ADDNOSOPAY": func(d *Dispatcher, l string) { cfgErr(d, d.N.CFG.Add(p(l, 1), 6)) },
 		"DELNOSOPAY": func(d *Dispatcher, l string) { cfgErr(d, d.N.CFG.Remove(p(l, 1), 6)) },
-		"RESTORECFG": func(d *Dispatcher, l string) { d.N.CFG.Restore(); d.reloadNodes() },
+		"RESTORECFG": cmdRestoreCFG,
 		"CLEARCFG":   func(d *Dispatcher, l string) { d.N.CFG.Clear(p(l, 1)); d.reloadNodes() },
 		"DIRECTIVE":  cmdDirective,
 		"SIGNCFG":    cmdSignCfg,
@@ -425,9 +425,9 @@ func init() {
 			v := codec.StrToIntDef(p(l, 1), 0)
 			switch {
 			case v <= 0 || v > 65535:
-				d.log("Invalid value")
+				d.fail("Invalid value")
 			case d.R != nil && d.R.Active():
-				d.log("Can not change the RPC port when it is active")
+				d.fail("Can not change the RPC port when it is active")
 			default:
 				d.N.UpdateOptions(func(o *node.StorageOptions) { o.RPCPort = int(v) })
 				_ = d.N.SaveOptions()
@@ -443,7 +443,7 @@ func init() {
 				if d.R.Active() {
 					d.log("RPC server already ENABLED")
 				} else {
-					d.log("Unable to start RPC port")
+					d.fail("Unable to start RPC port")
 				}
 				return
 			}
@@ -463,12 +463,10 @@ func init() {
 		},
 
 		// PSOs
-		"NEWPSO": func(d *Dispatcher, l string) {
-			params := "1:" + d.N.UTCTimeStr() + ";2:" + codec.IntToStr(d.N.MyLastBlock()) + ";3:1;4:500;5:2016;"
-			d.N.PSOs.AddNew(1, d.N.Wallet.At(0).Hash, int(d.N.MyLastBlock())+2016, params)
-			d.N.PSOs.Save(int(d.N.MyLastBlock()))
-			d.log("Added")
-		},
+		// FIX(GAP-5): the PSO file is part of the state root. Adding or clearing
+		// an entry on one node made it refuse the next block of the chain, and
+		// no order can create one, so these local test commands are gone.
+		"NEWPSO": removedPSOCommand,
 		"LISTPSOS": func(d *Dispatcher, l string) {
 			h := d.N.PSOs.Header()
 			d.log("PSOSs list")
@@ -479,7 +477,7 @@ func init() {
 				d.log("%d,%s,%s,%d,%s", x.Mode, x.Hash, x.Owner, x.Expire, x.Params)
 			}
 		},
-		"CLEARPSOS": func(d *Dispatcher, l string) {},
+		"CLEARPSOS": removedPSOCommand,
 		"SHOWPSOS": func(d *Dispatcher, l string) {
 			for i := 0; i < d.N.PSOs.LockedCount(); i++ {
 				m := d.N.PSOs.LockedAt(i)
@@ -495,7 +493,7 @@ func init() {
 			if list := FetchSeeds(p(l, 1), d.N.Options().ReleaseKey); list != "" {
 				cfgErr(d, d.N.CFG.SetData(list, 1))
 			} else {
-				d.log("No verified seed list (needs https url and a configured ReleaseKey).")
+				d.fail("No verified seed list (needs https url and a configured ReleaseKey).")
 			}
 		},
 
@@ -504,6 +502,33 @@ func init() {
 		"POST": cmdPost,
 		"TT":   cmdTT,
 	}
+}
+
+// cmdSendTo: sendto {destination} {amount} {reference}. The amount is in NOSO
+// ("10", "1.5", "0.00000001"); a trailing u gives base units ("150000000u").
+// The RPC method sendfunds takes base units only.
+func cmdSendTo(d *Dispatcher, l string) {
+	if !d.needNet() {
+		return
+	}
+	amount := p(l, 2)
+	if amount != "" {
+		units, err := network.ParseAmount(amount)
+		if err != nil {
+			d.fail("Invalid ammount: %v.", err)
+			d.log("Syntax: sendto {destination} {ammount in NOSO, for example 1.5} {reference}; 150000000u gives base units (1 NOSO = 100000000).")
+			return
+		}
+		l = "sendto " + p(l, 1) + " " + codec.IntToStr(units) + " " + p(l, 3)
+	}
+	if res := d.E.SendFunds(l, d.printer(), 0); res == "" || strings.HasPrefix(res, "ERROR") {
+		d.failed = true
+	}
+}
+
+func removedPSOCommand(d *Dispatcher, l string) {
+	d.fail("%s was removed: PSOs belong to the consensus state, so changing them on one node only makes it reject the next block. "+
+		"Blocks carry no PSO, so none can be created; listpsos and showpsos show them.", strings.ToLower(p(l, 0)))
 }
 
 func skipped(why string) func(d *Dispatcher, l string) {
@@ -519,7 +544,7 @@ func boolStr(b bool) string {
 
 func cfgErr(d *Dispatcher, err error) {
 	if err != nil {
-		d.log("Error: %v", err)
+		d.fail("Error: %v", err)
 	}
 }
 
@@ -535,4 +560,22 @@ func osVersion() string {
 
 func timestampToDate(ts int64) string {
 	return time.Unix(ts, 0).UTC().Format("02/01/2006 15:04:05")
+}
+
+// cmdRestoreCFG puts the defaults back for everything except the seed list.
+// FIX: it used to reset the seeds too, and this port ships no default seeds,
+// so the node went to zero peers without a word. `restorecfg seeds` does the
+// full reset on purpose.
+func cmdRestoreCFG(d *Dispatcher, l string) {
+	all := strings.EqualFold(p(l, 1), "seeds")
+	seeds := d.N.CFG.Param(1)
+	d.N.CFG.Restore()
+	if !all {
+		cfgErr(d, d.N.CFG.SetData(seeds, 1))
+		d.log("Configuration restored to the defaults. The seed list was kept: %s", strings.TrimSpace(strings.ReplaceAll(seeds, ":", " ")))
+	} else {
+		d.log("Configuration and seed list restored to the defaults. This build has no default seeds: " +
+			"the node has no peers to connect to until you set some (init-network -seed, or the directive/seed-url).")
+	}
+	d.reloadNodes()
 }

@@ -78,7 +78,7 @@ func cmdSystem(d *Dispatcher, l string) {
 		}
 		d.log("Download speed   : %d Kb/s", n/ms)
 	default:
-		d.log("Invalid parameter: %s\nUse: power, mem or downspeed", codec.ASCIIUpper(p(l, 1)))
+		d.fail("Invalid parameter: %s\nUse: power, mem or downspeed", codec.ASCIIUpper(p(l, 1)))
 	}
 }
 
@@ -135,14 +135,14 @@ func cmdShowWallet(d *Dispatcher, l string) {
 func cmdExpWallet(d *Dispatcher, l string) {
 	dest := strings.ReplaceAll(p(l, 1), "*", " ")
 	if dest == "" {
-		d.log("Syntax: expwallet {destination}")
+		d.fail("Syntax: expwallet {destination}")
 		return
 	}
 	if err := d.N.Wallet.ExportPKW(dest + ".pkw"); err != nil {
 		if errors.Is(err, os.ErrExist) {
-			d.log("Error: Can not overwrite existing wallets")
+			d.fail("Error: Can not overwrite existing wallets")
 		} else {
-			d.log("Failed: %v", err)
+			d.fail("Failed: %v", err)
 		}
 		return
 	}
@@ -167,7 +167,7 @@ func cmdImpWallet(d *Dispatcher, l string) {
 		if crypto.IsValidHashAddress(w.Hash) {
 			ok, err := d.N.Wallet.Add(w)
 			if err != nil {
-				d.log("Wallet not saved: %v", err)
+				d.fail("Wallet not saved: %v", err)
 				break
 			}
 			if ok {
@@ -186,7 +186,7 @@ func setDefault(d *Dispatcher, l string) bool {
 	idx := d.N.Wallet.IndexOf(p(l, 1))
 	switch {
 	case idx < 0 || idx > d.N.Wallet.Len()-1:
-		d.log("Invalid address.")
+		d.fail("Invalid address.")
 	case idx == 0:
 		d.log("Address is already the default.")
 	default:
@@ -201,7 +201,7 @@ func setDefault(d *Dispatcher, l string) bool {
 func showKeys(d *Dispatcher, l string) {
 	i := d.N.Wallet.IndexOf(p(l, 1))
 	if i < 0 {
-		d.log("Address not found in wallet")
+		d.fail("Address not found in wallet")
 		return
 	}
 	w := d.N.Wallet.At(i)
@@ -228,7 +228,7 @@ func cmdGetMulti(d *Dispatcher, l string) {
 	}
 	full, ok := crypto.GetMultiSource(p(l, 2), int(total))
 	if !ok {
-		d.log("Error: %s", full)
+		d.fail("Error: %s", full)
 		return
 	}
 	t = strings.ReplaceAll(t, " ", ",")
@@ -237,7 +237,7 @@ func cmdGetMulti(d *Dispatcher, l string) {
 	if crypto.IsValidHashAddress(addr) {
 		d.log("New multiAddress: %s", addr)
 		if _, err := d.N.Wallet.Add(types.Wallet{Hash: addr, PublicKey: key}); err != nil {
-			d.log("Wallet not saved: %v", err)
+			d.fail("Wallet not saved: %v", err)
 		}
 	} else {
 		d.log("Something went wrong...")
@@ -253,7 +253,7 @@ func cmdResumen(d *Dispatcher, l string) {
 	all := d.N.Headers.All()
 	errs := 0
 	if start >= len(all) {
-		d.log("Error: Seek past end of file")
+		d.fail("Error: Seek past end of file")
 		return
 	}
 	for i := start; i < len(all); i++ {
@@ -266,7 +266,7 @@ func cmdResumen(d *Dispatcher, l string) {
 			errs++
 		}
 	}
-	d.log("Errors : %d", errs)
+	d.fail("Errors : %d", errs)
 }
 
 func showBlockInfo(d *Dispatcher, n int64) {
@@ -469,7 +469,7 @@ func showBlockTail(d *Dispatcher, l string, pos bool) {
 		min = consensus.PoSBlockStart
 	}
 	if n < min || n > d.N.MyLastBlock() {
-		d.log("Invalid block number: %d", n)
+		d.fail("Invalid block number: %d", n)
 		return
 	}
 	b, _ := d.N.Blocks.Read(n)
@@ -651,7 +651,7 @@ func cmdDirective(d *Dispatcher, l string) {
 		}
 	}
 	if priv == "" {
-		d.log("No private key for the configured AdminKey in this wallet.")
+		d.fail("No private key for the configured AdminKey in this wallet.")
 		return
 	}
 	if !d.needNet() {
@@ -661,7 +661,7 @@ func cmdDirective(d *Dispatcher, l string) {
 	exp, ok2 := codec.StrToInt64(p(l, 2))
 	text := codec.Trim(codec.Copy(l, len(p(l, 0))+len(p(l, 1))+len(p(l, 2))+4, len(l)))
 	if !ok1 || !ok2 || text == "" {
-		d.log("Syntax: directive {sequence} {expiryBlock} {text}")
+		d.fail("Syntax: directive {sequence} {expiryBlock} {text}")
 		return
 	}
 	sig := crypto.SignCanonical(priv, "DIRECTIVE1", node.DirectiveFields(seq, exp, text)...)
@@ -679,20 +679,20 @@ func cmdSignCfg(d *Dispatcher, l string) {
 		if key != "" && w.PublicKey == key {
 			seq, ok := codec.StrToInt64(p(l, 1))
 			if !ok {
-				d.log("Syntax: signcfg {sequence}")
+				d.fail("Syntax: signcfg {sequence}")
 				return
 			}
 			content := d.N.CFG.DataStr()
 			sig := crypto.SignCanonical(w.PrivateKey, "CFG1", node.CFGFields(seq, content)...)
 			if err := d.N.AcceptConfig(node.SignedConfig{Seq: seq, Content: content, Sig: sig}); err != nil {
-				d.log("Error: %v", err)
+				d.fail("Error: %v", err)
 				return
 			}
 			d.log("Configuration signed with sequence %d", seq)
 			return
 		}
 	}
-	d.log("No private key for the configured ConfigKey in this wallet.")
+	d.fail("No private key for the configured ConfigKey in this wallet.")
 }
 
 // cmdPost mirrors PostOffer (mpparser.pas:1548-1600): it only validates
@@ -780,7 +780,7 @@ func cmdPubKey(d *Dispatcher, l string) {
 	i := 0
 	if a := p(l, 1); a != "" {
 		if i = d.N.Wallet.IndexOf(a); i < 0 {
-			d.log("Address not found in wallet")
+			d.fail("Address not found in wallet")
 			return
 		}
 	}
@@ -794,19 +794,25 @@ func cmdWallet(d *Dispatcher, l string) {
 	switch strings.ToLower(p(l, 1)) {
 	case "retire-legacy":
 		if err := d.N.Wallet.RetireLegacy(); err != nil {
-			d.log("Not retired: %v", err)
+			d.fail("Not retired: %v", err)
 			return
 		}
 		d.log("The clear-text wallet files were removed.")
 	case "":
+		said := false
 		if w := d.N.Wallet.LegacyWarning(); w != "" {
 			d.log("%s", w)
+			said = true
 		}
 		for _, w := range d.N.Wallet.Warnings() {
 			d.log("%s", w)
+			said = true
+		}
+		if !said {
+			d.log("No clear-text wallet files are left; the keys are in wallet.enc.")
 		}
 	default:
-		d.log("Syntax: wallet [retire-legacy]")
+		d.fail("Syntax: wallet [retire-legacy]")
 	}
 }
 
@@ -816,19 +822,19 @@ func cmdMNSet(d *Dispatcher, l string) {
 	ip, port, funds, sign := p(l, 1), p(l, 2), p(l, 3), p(l, 4)
 	switch {
 	case ip == "" || sign == "" || funds == "":
-		d.log("Syntax: mnset {ip} {port} {funds address} {sign address}")
+		d.fail("Syntax: mnset {ip} {port} {funds address} {sign address}")
 	case !codec.IsValidIP(ip):
-		d.log("Invalid IP")
+		d.fail("Invalid IP")
 	case codec.StrToIntDef(port, -1) < 1 || codec.StrToIntDef(port, -1) > 65535:
-		d.log("Invalid port")
+		d.fail("Invalid port")
 	case !crypto.IsValidHashAddress(funds):
-		d.log("Invalid funds address")
+		d.fail("Invalid funds address")
 	case d.N.Wallet.IndexOf(sign) < 0:
 		d.log("The sign address must be an address of this wallet")
 	default:
 		d.N.UpdateOptions(func(o *node.StorageOptions) { o.MNIP, o.MNPort, o.MNFunds, o.MNSign = ip, port, funds, sign })
 		if err := d.N.SaveOptions(); err != nil {
-			d.log("Not saved: %v", err)
+			d.fail("Not saved: %v", err)
 			return
 		}
 		d.log("Masternode set: %s:%s funds %s sign %s", ip, port, funds, sign)
@@ -842,7 +848,7 @@ func cmdMNDelegate(d *Dispatcher, l string) {
 	funds, sign := p(l, 1), p(l, 2)
 	i := d.N.Wallet.IndexOf(funds)
 	if i < 0 || !crypto.IsValidHashAddress(sign) {
-		d.log("Syntax: mndelegate {funds address in this wallet} {sign address}")
+		d.fail("Syntax: mndelegate {funds address in this wallet} {sign address}")
 		return
 	}
 	w := d.N.Wallet.At(i)

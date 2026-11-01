@@ -147,3 +147,13 @@ func FuzzParse(f *testing.F) {
 	s := newServerFuzz()
 	f.Fuzz(func(t *testing.T, in string) { s.Parse(in) })
 }
+
+// getmainnetinfo with no consensus (a single node, or seeds that have not
+// agreed) answers with the node's own view instead of error 499.
+func TestMainnetInfoWithoutConsensus(t *testing.T) {
+	s := newServer(t)
+	got := s.Parse(`{"jsonrpc":"2.0","method":"getmainnetinfo","params":[],"id":5}`)
+	if strings.Contains(got, `"error"`) || !strings.Contains(got, `"lastblock"`) || !strings.Contains(got, `"supply"`) {
+		t.Fatalf("getmainnetinfo without consensus: %s", got)
+	}
+}

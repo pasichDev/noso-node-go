@@ -5,8 +5,10 @@ package control
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -40,8 +42,21 @@ func SocketPath(dataDir string) string {
 // MaxLine bounds one command line.
 const MaxLine = 64 << 10
 
-// Runner executes a command and streams its output.
-type Runner func(line string, out func(string))
+// Runner executes a command and streams its output. proof is the wallet
+// passphrase the client sent along (nil if none): commands that print or sign
+// with private keys must check it, because the socket is open to every process
+// of the same user and a passphrase typed into a GUI is held nowhere else.
+// The result is false when the command failed.
+type Runner func(line string, proof []byte, out func(string)) bool
+
+// ErrFailed is returned by Call when the command ran but failed. Its output
+// was written to the writer.
+var ErrFailed = errors.New("command failed")
+
+const (
+	authPrefix = "\x01AUTH "
+	failMarker = "\x00FAILED\n"
+)
 
 // Server is a running control socket.
 type Server struct {
@@ -89,7 +104,16 @@ func Serve(path string, run Runner) (*Server, error) {
 				if err != nil && line == "" {
 					return
 				}
-				run(strings.TrimRight(line, "\r\n"), func(s string) { _, _ = io.WriteString(c, s+"\n") })
+				var proof []byte
+				if strings.HasPrefix(line, authPrefix) { // optional first line: the wallet passphrase
+					proof = []byte(strings.TrimRight(line[len(authPrefix):], "\r\n"))
+					if line, err = r.ReadString('\n'); err != nil && line == "" {
+						return
+					}
+				}
+				if !run(strings.TrimRight(line, "\r\n"), proof, func(s string) { _, _ = io.WriteString(c, s+"\n") }) {
+					_, _ = io.WriteString(c, failMarker)
+				}
 			}()
 		}
 	}()
@@ -106,8 +130,13 @@ func (s *Server) Close() error {
 	return err
 }
 
-// Call sends one command to a running daemon and relays its output to w.
-func Call(path, line string, w io.Writer) error {
+// Call sends one command to a running daemon and relays its output to w. It
+// returns ErrFailed when the command ran and failed.
+func Call(path, line string, w io.Writer) error { return CallAuth(path, line, nil, w) }
+
+// CallAuth is Call with the wallet passphrase as proof for the commands that
+// need it.
+func CallAuth(path, line string, pass []byte, w io.Writer) error {
 	if strings.HasPrefix(path, os.TempDir()) { // the shared-directory case
 		if err := checkOwner(filepath.Dir(path)); err != nil {
 			return err
@@ -118,9 +147,41 @@ func Call(path, line string, w io.Writer) error {
 		return err
 	}
 	defer c.Close()
+	if len(pass) > 0 {
+		if _, err := io.WriteString(c, authPrefix+string(pass)+"\n"); err != nil {
+			return err
+		}
+	}
 	if _, err := io.WriteString(c, line+"\n"); err != nil {
 		return err
 	}
-	_, err = io.Copy(w, c)
-	return err
+	// stream the output, holding back the last bytes: they may be the marker
+	var tail []byte
+	chunk := make([]byte, 4096)
+	for {
+		n, err := c.Read(chunk)
+		tail = append(tail, chunk[:n]...)
+		if len(tail) > len(failMarker) {
+			if _, werr := w.Write(tail[:len(tail)-len(failMarker)]); werr != nil {
+				return werr
+			}
+			tail = append([]byte(nil), tail[len(tail)-len(failMarker):]...)
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+	}
+	failed := bytes.Equal(tail, []byte(failMarker))
+	if !failed {
+		if _, err := w.Write(tail); err != nil {
+			return err
+		}
+	}
+	if failed {
+		return ErrFailed
+	}
+	return nil
 }

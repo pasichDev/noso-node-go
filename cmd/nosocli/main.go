@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/pasichDev/noso-node-go/internal/cli"
@@ -33,12 +34,18 @@ func run() int {
 	echo := flag.Bool("echo", false, "echo the command before running it")
 	passFile := flag.String("wallet-pass-file", "", "file holding the wallet passphrase (or NOSO_WALLET_PASSPHRASE)")
 	plain := flag.Bool("insecure-plain-wallet", false, "open a clear-text wallet.pkw")
+	create := flag.Bool("create", false, "allow creating the data directory (and a new wallet in it) when it does not exist yet")
 	flag.Parse()
 	if *list {
 		for _, c := range cli.Commands() {
 			fmt.Println(strings.ToLower(c))
 		}
 		return 0
+	}
+	if !*create && !looksLikeDataDir(*data) && !socketAnswers(*data) {
+		fmt.Fprintf(os.Stderr, "%s is not a Noso data directory (no wallet, no advopt.txt, no BLOCKS, no running node). "+
+			"Is the -data path a typo? Nothing was created. To start a new wallet there on purpose, add -create.\n", *data)
+		return 1
 	}
 	var lock *storage.DirLock
 	var d *cli.Dispatcher
@@ -49,7 +56,23 @@ func run() int {
 	}()
 	status := 0
 	one := func(line string) {
-		if err := control.Call(control.SocketPath(*data), line, os.Stdout); err == nil {
+		var err error
+		if cli.NeedsProof(line) { // keys: the daemon wants the passphrase as proof
+			pass, perr := readPass(*passFile)
+			if perr != nil {
+				fmt.Fprintln(os.Stderr, "wallet passphrase:", perr)
+				status = 1
+				return
+			}
+			err = control.CallAuth(control.SocketPath(*data), line, pass, os.Stdout)
+		} else {
+			err = control.Call(control.SocketPath(*data), line, os.Stdout)
+		}
+		if err == nil {
+			return
+		}
+		if errors.Is(err, control.ErrFailed) { // the daemon ran it and it failed
+			status = 1
 			return
 		}
 		if d == nil {
@@ -60,7 +83,9 @@ func run() int {
 				return
 			}
 		}
-		d.RunTo(line, func(s string) { fmt.Println(s) })
+		if !d.RunStatus(line, func(s string) { fmt.Println(s) }) {
+			status = 1
+		}
 	}
 	if flag.NArg() > 0 {
 		one(strings.Join(flag.Args(), " "))
@@ -94,14 +119,10 @@ func openOffline(data, passFile string, plain, echo, ro bool) (*cli.Dispatcher, 
 		}
 		return nil, nil, fmt.Errorf("cannot open data directory: %w", err)
 	}
-	pass := []byte(os.Getenv("NOSO_WALLET_PASSPHRASE"))
-	if passFile != "" {
-		b, err := os.ReadFile(passFile)
-		if err != nil {
-			_ = lock.Close()
-			return nil, nil, fmt.Errorf("wallet passphrase: %w", err)
-		}
-		pass = []byte(strings.TrimRight(string(b), "\r\n"))
+	pass, err := readPass(passFile)
+	if err != nil {
+		_ = lock.Close()
+		return nil, nil, fmt.Errorf("wallet passphrase: %w", err)
 	}
 	if err := cli.CheckNewPassphrase(data, pass); err != nil { // finding 20
 		_ = lock.Close()
@@ -118,4 +139,35 @@ func openOffline(data, passFile string, plain, echo, ro bool) (*cli.Dispatcher, 
 	d := cli.New(n, nil, nil)
 	d.Echo = echo
 	return d, lock, nil
+}
+
+// readPass returns the wallet passphrase from the file or the environment.
+func readPass(passFile string) ([]byte, error) {
+	if passFile != "" {
+		b, err := os.ReadFile(passFile)
+		if err != nil {
+			return nil, err
+		}
+		return []byte(strings.TrimRight(string(b), "\r\n")), nil
+	}
+	return []byte(os.Getenv("NOSO_WALLET_PASSPHRASE")), nil
+}
+
+// looksLikeDataDir reports whether dir holds a node: a wallet, options or
+// blocks. A path that does not exist, or is some other folder, is not one;
+// opening it would create a brand-new wallet there (a typo then looks like
+// lost coins).
+func looksLikeDataDir(dir string) bool {
+	for _, f := range []string{"wallet.enc", "wallet.pkw", "advopt.txt", "BLOCKS"} {
+		if _, err := os.Stat(filepath.Join(dir, f)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// socketAnswers reports whether a daemon listens on the control socket of dir.
+func socketAnswers(dir string) bool {
+	_, err := os.Stat(control.SocketPath(dir))
+	return err == nil
 }
