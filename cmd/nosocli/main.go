@@ -10,6 +10,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,8 +56,14 @@ func run() int {
 		}
 	}()
 	status := 0
+	var keyIn io.Reader = os.Stdin // not usable while the commands themselves come from stdin
 	one := func(line string) {
 		var err error
+		if line, err = cli.PrepareKeyImport(line, keyIn); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			status = 1
+			return
+		}
 		if cli.NeedsProof(line) { // keys: the daemon wants the passphrase as proof
 			pass, perr := readPass(*passFile)
 			if perr != nil {
@@ -91,6 +98,7 @@ func run() int {
 		one(strings.Join(flag.Args(), " "))
 		return status
 	}
+	keyIn = nil
 	sc := bufio.NewScanner(os.Stdin)
 	fmt.Print("> ")
 	for sc.Scan() {
